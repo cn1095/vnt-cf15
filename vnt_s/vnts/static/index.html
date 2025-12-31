@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script src="./js/jquery-3.7.1.min.js"></script>
+    <script src="./js/g6.min.js"></script>
+    <script src="./js/qrcode.min.js"></script>
+    <script src="./js/api-post.js"></script>
+
+    <link rel="stylesheet" href="./css/select.css">
+    <link rel="stylesheet" href="./css/index.css">
+    <title>vnts-web</title>
+    <style>
+
+        .select-content:before {
+            content: "组网token";
+            position: absolute;
+            left: -76px;
+            line-height: 48px;
+        }
+
+        #container_content {
+            position: relative;
+            margin-left: 240px;
+            padding-left: 10px;
+            height: 100%;
+        }
+
+        #container {
+            height: calc(100vh - 260px);
+        }
+
+
+        .network_info > div {
+            height: 20px;
+            line-height: 20px;
+        }
+
+        #group_info_show {
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        table, th, td {
+            border: 1px solid #ccc;
+        }
+
+        th, td {
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        /* 路由配置折叠样式 */  
+        #routeConfigToggle {  
+            user-select: none;  
+        }  
+  
+        #routeConfigToggle:hover {  
+            background-color: #e8e8e8;  
+        }  
+  
+        #routeToggleIcon {  
+            display: inline-block;  
+            margin-right: 5px;  
+            transition: transform 0.3s;  
+        }  
+  
+        #routeToggleIcon.expanded {  
+            transform: rotate(90deg);  
+        }  
+  
+        /* 路由配置样式 */  
+        .route-item {  
+            background-color: #f9f9f9;  
+            border: 1px solid #ddd;  
+            padding: 10px;  
+            margin-bottom: 10px;  
+            border-radius: 4px;  
+            display: flex;  
+            align-items: center;  
+            gap: 10px;  
+        }  
+  
+        .route-item label {  
+            font-size: 12px;  
+            margin-bottom: 5px;  
+            display: block;  
+        }  
+  
+        .route-item input {  
+            font-size: 14px;  
+            padding: 5px;  
+            width: 100%;  
+            box-sizing: border-box;  
+        }  
+  
+        .route-item-field {  
+            flex: 1;  
+        }  
+  
+        .remove-route {  
+            background-color: #f44336;  
+            color: white;  
+            border: none;  
+            padding: 8px 12px;  
+            border-radius: 4px;  
+            cursor: pointer;  
+            font-size: 14px;  
+            white-space: nowrap;  
+        }  
+  
+        .remove-route:hover {  
+            background-color: #d32f2f;  
+        }  
+  
+        #addRouteBtn {  
+            background-color: #6c757d;  
+            color: white;  
+            border: none;  
+            padding: 8px 15px;  
+            cursor: pointer;  
+            border-radius: 4px;  
+            font-size: 14px;  
+        }  
+  
+        #addRouteBtn:hover {  
+            background-color: #5a6268;  
+        } 
+    </style>
+</head>
+<body>
+<div class="bigbox">
+    <!-- 点击效果 -->
+    <!--  <input type="checkbox" id="checkbox"/>
+      <label for="checkbox">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+      </label>-->
+    <ul>
+        <li>
+            <img src="./svg/组网交换机.svg" alt="VNT"/>
+            <span>VNT</span>
+        </li>
+        <li>
+            <a href="#">
+                <img src="svg/组网管理.svg" alt="1">
+                <span>组网管理</span>
+            </a>
+        </li>
+        <!--     <li>
+                 <a href="#">
+                     <img src="./svg/控制面板.svg" alt="3">
+                     <span>控制面板</span>
+                 </a>
+             </li>-->
+    </ul>
+
+</div>
+<div class="topBox">
+    <div class="select-content">
+        <!--        <label>组网标识：</label>-->
+        <input type="hidden" name="groupId">
+        <input type="text" name="select_input" id="select_input" class="select-input" value="" autocomplete="off"
+               placeholder="请输入您的组网token."/>
+        <button id="searchButton" type="button">搜索</button> 
+        <div id="search_select" class="search-select">
+            <ul id="select_ul" class="select-ul">
+
+            </ul>
+        </div>
+        <span class="group_len"></span>
+    </div>
+    <button id="addWireGuard">新建WireGuard客户端</button>
+</div>
+<div id="container_content">
+    <div id="group_info">
+        <div class="network_info">
+            <div class="gateway_ip"></div>
+            <div class="mask_ip"></div>
+            <div class="network_ip"></div>
+        </div>
+        <div id="group_info_show">
+            <div id="container">
+
+            </div>
+            <table id="deviceTable">
+                <thead>
+                <tr>
+                    <th>虚拟 IP</th>
+                    <th>名称</th>
+                    <th>版本</th>
+                    <th>在线状态</th>
+                    <th>客户端加密</th>
+                    <th>服务器加密</th>
+                    <th>连接时间</th>
+                    <th>链接地址</th>
+                    <th>设备 ID</th>
+                    <th>操作</th>
+                </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+<!-- wg信息弹窗 -->
+<div id="wgConfigModal" class="modal">
+    <div class="modal-content">
+        <span class="title">使用WireGuard客户端接入</span>
+        <span class="close">&times;</span>
+        <div id="qrcode" class="visible"></div>
+        <pre id="textConfig" class="hidden"></pre>
+        <button id="toggleButton">显示文本配置</button>
+    </div>
+</div>
+<!-- 添加wg弹窗 -->
+<div id="addModal" class="modal">  
+    <div class="add-modal-content" style="max-width: 500px; max-height: 80vh; overflow-y: auto;">  
+        <span class="close">&times;</span>  
+        <h2>WireGuard配置</h2>  
+        <div class="form-group">  
+            <label for="groupId">组网token</label>  
+            <input type="text" id="groupId" placeholder="组网token">  
+        </div>  
+        <div class="form-group">  
+            <label for="virtualIP">虚拟IP</label>  
+            <input type="text" id="virtualIP" placeholder="为空则自动分配">  
+        </div>  
+        <div class="form-group">  
+            <label for="deviceName">设备名称</label>  
+            <input type="text" id="deviceName" placeholder="设备名称">  
+        </div>  
+        <div class="form-group">  
+            <label for="privateKey">PrivateKey</label>  
+            <input type="text" id="privateKey" placeholder="PrivateKey">  
+        </div>  
+        <div class="form-group">  
+            <label for="endpoint">Endpoint</label>  
+            <input type="text" id="endpoint" placeholder="服务器的UDP链接地址">  
+        </div>  
+        <div class="form-group">  
+            <label for="persistentKeepalive">PersistentKeepalive</label>  
+            <input type="number" id="persistentKeepalive" value="10" placeholder="PersistentKeepalive">  
+        </div>  
+          
+        <!-- 路由配置区域 - 折叠式 -->  
+        <div class="form-group" style="display: block;">  
+            <div id="routeConfigToggle" style="cursor: pointer; padding: 10px; background-color: #f0f0f0; border-radius: 4px; margin-bottom: 10px;">  
+                <span id="routeToggleIcon">▶</span>  
+                <strong>路由配置 (可选)</strong>  
+                <small style="display: block; color: #666; margin-top: 5px;">点击展开配置此WireGuard客户端可访问的vnt客户端内网网段</small>  
+            </div>  
+            <div id="routeConfigContent" style="display: none;">  
+                <div id="routeList">  
+                    <!-- 动态添加的路由条目 -->  
+                </div>  
+                <button type="button" id="addRouteBtn" style="margin-top: 10px;">  
+                    添加路由  
+                </button>  
+            </div>  
+        </div>  
+          
+        <div class="button-container">  
+            <button id="confirmButton">确认</button>  
+        </div>  
+        <div class="error" id="addWGError"></div>  
+    </div>  
+</div>
+</body>
+<script src="js/group-node.js"></script>
+
+<script>
+    if (!auth) {
+        window.location.replace("login.html");
+    }
+
+
+    // console.log("auth" + auth)
+</script>
+<script>
+    // 点击按钮设置下拉菜单的显示与隐藏
+
+    function newOptions(tempArr) {
+        var listArr = [];
+        for (var i = 0; i < tempArr.length; i++) {
+            if (tempArr[i].indexOf($('#select_input').val()) > -1) {
+                listArr.push(tempArr[i]);
+            }
+        }
+        var options = '';
+        for (var i = 0; i < listArr.length; i++) {
+            opt = '<li class="li-select" data-groupId="' + listArr[i] + '">' + listArr[i] + '</li>';
+            options += opt;
+        }
+        if (options == '') {
+            $('#search_select').hide();
+        } else {
+            $('#search_select').show();
+            $('#select_ul').html('').append(options);
+        }
+    }
+    
+    function searchInput(tempArr) {  
+        // 提取提交逻辑为独立函数 
+        function submitGroupId() {  
+            var inputVal = $('#select_input').val().trim();    
+            if (inputVal) {  
+                $("input[name='groupId']").val(inputVal);    
+                getGroupInfoFunc(inputVal);    
+            } else {    
+                alert('请输入组网token');    
+            }  
+        }  
+      
+        // 回车键提交 
+        $('#select_input').on('keypress', function (e) {    
+            if (e.which === 13) {   
+                submitGroupId();  
+            }    
+        });  
+
+        // 按钮点击提交 
+        $('#searchButton').on('click', function() {  
+            submitGroupId();  
+        });  
+        
+        $('#search_select').hide();    
+        $('.group_len').html('');   
+    }
+      
+    function displayDeviceInfo(groupId, data) {
+        let devices = data.clients;
+        const tableBody = document.getElementById('deviceTable').getElementsByTagName('tbody')[0];
+        tableBody.innerHTML = "";
+        devices.forEach(device => {
+            const row = document.createElement('tr');
+
+            const virtualIpCell = document.createElement('td');
+            virtualIpCell.textContent = device.virtual_ip;
+            row.appendChild(virtualIpCell);
+
+            const nameCell = document.createElement('td');
+            nameCell.textContent = device.name;
+            row.appendChild(nameCell);
+
+            const versionCell = document.createElement('td');
+            versionCell.textContent = device.version;
+            row.appendChild(versionCell);
+
+            const onlineCell = document.createElement('td');
+            onlineCell.textContent = device.online ? '在线' : '离线';
+            row.appendChild(onlineCell);
+
+            const clientSecretCell = document.createElement('td');
+            clientSecretCell.textContent = device.client_secret ? '是' : '否';
+            row.appendChild(clientSecretCell);
+
+            const serverSecretCell = document.createElement('td');
+            serverSecretCell.textContent = device.server_secret ? '是' : '否';
+            row.appendChild(serverSecretCell);
+
+            const lastJoinTimeCell = document.createElement('td');
+            lastJoinTimeCell.textContent = device.last_join_time;
+            row.appendChild(lastJoinTimeCell);
+
+            const addressCell = document.createElement('td');
+            addressCell.textContent = device.address;
+            row.appendChild(addressCell);
+
+            const deviceIdCell = document.createElement('td');
+            deviceIdCell.textContent = device.device_id;
+            row.appendChild(deviceIdCell);
+            // 操作栏
+            const optionCell = document.createElement('td');
+            optionCell.className = 'option-cell';
+            const deleteButton = document.createElement('button');
+            optionCell.appendChild(deleteButton);
+            deleteButton.className = 'delete-button';
+            deleteButton.textContent = '删除';
+            deleteButton.onclick = function () {
+                const confirmed = window.confirm('你确定要删除这条记录吗？');
+                if (confirmed) {
+                    postRemoveClient({'group_id': groupId, 'virtual_ip': device.virtual_ip}, function () {
+                        location.reload();
+                    });
+                    row.remove();
+                }
+
+            };
+            let wg_config = device.wg_config;
+            if (wg_config) {
+                function generateWireguardConfig(privateKey, ip, prefix, publicKey, allowedIPs, endpoint, persistentKeepalive) {
+                    return `[Interface]
+PrivateKey = ${privateKey}
+Address = ${ip}/${prefix}
+[Peer]
+PublicKey = ${publicKey}
+AllowedIPs = ${allowedIPs}
+Endpoint = ${endpoint}
+PersistentKeepalive = ${persistentKeepalive}`;
+                }
+
+                const wireguardConfig = generateWireguardConfig(wg_config.secret_key, wg_config.ip, wg_config.prefix,
+                    data.vnts_public_key, wg_config.vnts_allowed_ips, wg_config.vnts_endpoint, wg_config.persistent_keepalive);
+                console.log(wireguardConfig);
+                const viewButton = document.createElement('button');
+                viewButton.textContent = '接入';
+                viewButton.className = 'view-button';
+                viewButton.onclick = function () {
+                    // 显示弹窗
+                    $('#wgConfigModal').show();
+                    // 设置文本配置
+                    $('#textConfig').text(wireguardConfig);
+                    $('#qrcode').html('');
+                    // 生成二维码
+                    new QRCode(document.getElementById("qrcode"), {
+                        correctLevel: 3,
+                        text: wireguardConfig,
+                        width: 256,
+                        height: 256
+                    });
+
+                };
+                optionCell.appendChild(viewButton);
+            }
+            row.appendChild(optionCell);
+            tableBody.appendChild(row);
+        });
+    }
+</script>
+<script>
+    let groupId;
+    let deviceId = 'wg' + new Date().getTime();
+    // 路由配置折叠/展开功能  
+    $('#routeConfigToggle').on('click', function() {  
+        const content = $('#routeConfigContent');  
+        const icon = $('#routeToggleIcon');  
+      
+        if (content.is(':visible')) {  
+            content.slideUp(300);  
+            icon.removeClass('expanded');  
+        } else {  
+            content.slideDown(300);  
+            icon.addClass('expanded');  
+        }  
+    });
+    // 路由配置管理 
+    let routeIndex = 0;  
+  
+    // 添加路由条目 
+    $('#addRouteBtn').click(function() {  
+        const routeHtml = `  
+            <div class="route-item" data-index="${routeIndex}">  
+                <div class="route-item-field">  
+                    <label>vnt-cli虚拟IP</label>  
+                    <input type="text" class="route-gateway" placeholder="例如: 10.26.0.2">  
+                </div>  
+                <div class="route-item-field">  
+                    <label>对应的内网网段 (CIDR)</label>  
+                    <input type="text" class="route-network" placeholder="例如: 192.168.1.0/24">  
+                </div>  
+                <button type="button" class="remove-route">删除</button>  
+            </div>  
+        `;
+        $('#routeList').append(routeHtml);  
+        routeIndex++;  
+    });
+    // 删除路由条目 
+    $(document).on('click', '.remove-route', function() {  
+        $(this).closest('.route-item').remove();  
+    }); 
+    $('#addWireGuard').on('click', function () {
+        $('#groupId').val(groupId);
+        $('#deviceName').val('WireGuard');
+        postWgPrivateKey({}, function (data) {
+            $('#privateKey').val(data.data);
+            $('.error').text('');
+            $('#addModal').show();
+        })
+    });
+    $('#confirmButton').on('click', function () {
+        // 清除以前的错误信息
+        $('.error').text('');
+        // 获取输入值
+        const groupId = $('#groupId').val().trim();
+        const virtualIP = $('#virtualIP').val().trim();
+        const deviceName = $('#deviceName').val().trim();
+        const privateKey = $('#privateKey').val().trim();
+        const endpoint = $('#endpoint').val().trim();
+        const persistentKeepalive = $('#persistentKeepalive').val().trim();
+        // 校验输入值
+        if (!groupId) {
+            $('#addWGError').text('组网编号不能为空');
+            return
+        }
+
+        if (!deviceName) {
+            $('#addWGError').text('设备名称不能为空');
+            return;
+        }
+
+        if (!privateKey) {
+            $('#addWGError').text('PrivateKey不能为空');
+            return;
+        }
+
+        if (!endpoint) {
+            $('#addWGError').text('Endpoint不能为空');
+            return;
+        }
+
+        if (persistentKeepalive === '') {
+            $('#addWGError').text('PersistentKeepalive不能为空');
+            return;
+        } else if (isNaN(persistentKeepalive) || persistentKeepalive < 0 || persistentKeepalive > 65535) {
+            $('#addWGError').text('PersistentKeepalive必须是0~65535');
+            return;
+        }
+        // 收集路由配置 
+        const routes = [];  
+        $('.route-item').each(function() {  
+            const gatewayIp = $(this).find('.route-gateway').val().trim();  
+            const network = $(this).find('.route-network').val().trim();  
+          
+            if (gatewayIp && network) {  
+                /* 验证 IP 格式 */
+                const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;  
+                if (!ipPattern.test(gatewayIp)) {  
+                    $('#addWGError').text('vnt-cli虚拟IP格式错误: ' + gatewayIp);  
+                    return false;  
+                }  
+              
+                // 验证 CIDR 格式 
+                const cidrPattern = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;  
+                if (!cidrPattern.test(network)) {  
+                    $('#addWGError').text('内网网段格式错误，应为CIDR格式(如: 192.168.1.0/24): ' + network);  
+                    return false;  
+                }  
+              
+                routes.push({  
+                    vnt_cli_ip: gatewayIp,  
+                    lan_network: network  
+                });  
+            }  
+        }); 
+        // 构建请求数据 
+        const requestData = {  
+            'group_id': groupId,  
+            'virtual_ip': virtualIP,  
+            'device_id': deviceId,  
+            'name': deviceName,  
+            'config': {  
+                'vnts_endpoint': endpoint,  
+                'private_key': privateKey,  
+                'persistent_keepalive': parseInt(persistentKeepalive),  
+            }  
+        };
+        // 如果有路由配置，添加到请求中 
+        if (routes.length > 0) {  
+            requestData.routes = routes;  
+        } 
+      
+        postCreateWG(requestData, function (data) {  
+            if (data && data.code === 200) {  
+                location.reload();  
+                $('#addModal').hide();  
+            } else {  
+                $('#addWGError').text('添加失败:' + data.message);  
+            }  
+        });
+    });
+
+    function formatBytes(bytes) {
+        if (!bytes) {
+            return ''
+        }
+        const gigabytes = Math.floor(bytes / (1024 * 1024 * 1024));
+        let remaining_bytes = bytes % (1024 * 1024 * 1024);
+        const megabytes = Math.floor(remaining_bytes / (1024 * 1024));
+        remaining_bytes = remaining_bytes % (1024 * 1024);
+        const kilobytes = Math.floor(remaining_bytes / 1024);
+        remaining_bytes = remaining_bytes % 1024;
+        let s = '';
+        if (gigabytes > 0) {
+            s += gigabytes + ' GB ';
+        }
+        if (megabytes > 0) {
+            s += megabytes + ' MB ';
+        }
+        if (kilobytes > 0) {
+            s += kilobytes + ' KB ';
+        }
+        if (remaining_bytes > 0) {
+            s += remaining_bytes + ' bytes';
+        }
+        return s.trim();
+    }
+
+    let nodeInitFunc = function (gateway_ip, clients) {
+        let nodes = [{
+            id: gateway_ip,
+            label: gateway_ip,
+            x: 0,
+            y: 0,
+            type: 'ellipse',
+            size: [80, 60],
+            icon: {
+                show: true,
+                img: './svg/路由器.svg',
+                width: 40,
+                height: 40,
+            },
+            labelCfg: {
+                style: {
+                    fill: '#1890ff',
+                    fontSize: 14,
+                    background: {
+                        fill: '#ffffff',
+                        stroke: '#9EC9FF',
+                        padding: [2, 2, 2, 2],
+                        radius: 2,
+                    },
+                },
+                position: 'bottom',
+            }
+        }];
+        let edges = [];
+        for (let index in clients) {
+            let client = clients[index];
+            let status_info = client.status_info;
+            if (!status_info) {
+                status_info = {};
+            }
+            let node = {
+                clientName: client.name,
+                clientVersion: client.version,
+                deviceId: client.device_id,
+                lastJoinTime: client.last_join_time,
+                natType: status_info.is_cone == null ? '' : (status_info.is_cone ? '锥形' : '对称'),
+                upStream: formatBytes(status_info.up_stream),
+                downStream: formatBytes(status_info.down_stream),
+                clientSecret: client.client_secret,
+                id: client.virtual_ip,
+                name: '',
+                ip: client.virtual_ip,
+                nodeError: !client.online,
+                dataType: client.name,
+                keyInfo: client.address,
+            };
+            nodes.push(node);
+            if (client.online) {
+                if (client.status_info && client.status_info.p2p_list) {
+                    let p2p_list = client.status_info.p2p_list;
+                    for (let index in p2p_list) {
+                        edges.push({
+                            source: client.virtual_ip,
+                            target: p2p_list[index],
+                        })
+                    }
+                }
+            }
+        }
+        let data = {
+            nodes: nodes,
+            edges: edges,
+        };
+        // console.log(data)
+
+        graph.data(data);
+        graph.render();
+    }
+    let getGroupInfoFunc = function (group) {  
+        groupId = group;  
+        postGroupInfo({'group': group}, function (response) {  
+            if (response && response.code === 200 && response.data) {  
+                let data = response.data;  
+                $('.gateway_ip').html(data.gateway_ip);  
+                $('.mask_ip').html(data.mask_ip);  
+                $('.network_ip').html(data.network_ip);  
+                nodeInitFunc(data.gateway_ip, data.clients);  
+                displayDeviceInfo(group, data);  
+                sessionStorage.setItem('currentGroupId', group);   
+            } else {  
+                window.alert("组网token不存在或调用服务失败");  
+                sessionStorage.removeItem('currentGroupId');  
+            }  
+        })  
+    }
+    // 带下拉列表的搜索功能  
+    function searchInputWithList(tempArr) {  
+        function submitGroupId() {  
+            var inputVal = $('#select_input').val().trim();  
+            if (inputVal) {  
+                $("input[name='groupId']").val(inputVal);  
+                getGroupInfoFunc(inputVal);  
+            } else {  
+                alert('请输入组网token');  
+            }  
+        }  
+  
+        $('#select_input').on('input', function() {  
+            newOptions(tempArr);  
+        });  
+  
+        $('#select_input').on('focus', function() {  
+            if ($(this).val() === '') {  
+                newOptions(tempArr);  
+            }  
+        });  
+  
+        $(document).on('click', '.li-select', function() {  
+            var groupId = $(this).data('groupid');  
+            $('#select_input').val(groupId);  
+            $('#search_select').hide();  
+            getGroupInfoFunc(groupId);  
+        });  
+  
+        $(document).on('click', function(e) {  
+            if (!$(e.target).closest('.select-content').length) {  
+                $('#search_select').hide();  
+            }  
+        });  
+  
+        $('#select_input').on('keypress', function(e) {  
+            if (e.which === 13) {  
+                submitGroupId();  
+            }  
+        });  
+  
+        $('#searchButton').on('click', function() {  
+            submitGroupId();  
+        });  
+    }
+    // 获取组网列表  
+    function loadGroupList() {  
+        postGroupList({}, function(response) {  
+            if (response && response.code === 200 && response.data) {  
+                let groupList = response.data;  
+                if (groupList.length > 0) {  
+                    searchInputWithList(groupList);  
+                    $('.group_len').html('共 ' + groupList.length + ' 个组网');  
+                } else {  
+                    searchInput([]);  
+                }  
+            } else {  
+                searchInput([]);  
+            }  
+        }, function() {  
+            searchInput([]);  
+        });  
+    }  
+    loadGroupList()
+    const savedGroupId = sessionStorage.getItem('currentGroupId');  
+    if (savedGroupId) {  
+        $('#select_input').val(savedGroupId);  
+        getGroupInfoFunc(savedGroupId);  
+    }
+    $('.close').on('click', function () {
+        $('#wgConfigModal').hide();
+        $('#addModal').hide();
+    });
+    $('#toggleButton').on('click', function () {
+        if ($('#qrcode').hasClass('visible')) {
+            $('#qrcode').removeClass('visible').addClass('hidden');
+            $('#textConfig').removeClass('hidden').addClass('visible');
+            $('#toggleButton').text('显示二维码');
+        } else {
+            $('#qrcode').removeClass('hidden').addClass('visible');
+            $('#textConfig').removeClass('visible').addClass('hidden');
+            $('#toggleButton').text('显示文本配置');
+        }
+    });
+</script>
+</html>
