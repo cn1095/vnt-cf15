@@ -7,27 +7,72 @@ export class NetPacket {
   }  
   
   static parse(buffer) {  
-    if (buffer.length < PACKET_HEADER_SIZE) {  
-      throw new Error('Packet too short');  
+    // 安全检查：确保输入有效  
+    if (!buffer) {  
+      throw new Error('Buffer is null or undefined');  
     }  
       
-    const packet = new NetPacket(buffer);  
-    packet.parseHeader();  
-    return packet;  
+    if (!(buffer instanceof Uint8Array) && !(buffer instanceof ArrayBuffer)) {  
+      throw new Error('Invalid buffer type: expected Uint8Array or ArrayBuffer');  
+    }  
+      
+    // 获取缓冲区长度  
+    const length = buffer instanceof Uint8Array ? buffer.length : buffer.byteLength;  
+      
+    if (length < 13) { // PACKET_HEADER_SIZE  
+      throw new Error(`Packet too short: ${length} bytes, minimum 13 bytes required`);  
+    }  
+        
+    try {  
+      const packet = new NetPacket(buffer);  
+      packet.parseHeader();  
+      return packet;  
+    } catch (error) {  
+      throw new Error(`Failed to parse VNT packet: ${error.message}`);  
+    }  
   }  
   
   parseHeader() {  
-    const view = new DataView(this.data.buffer);  
+    // 安全检查：确保数据存在且类型正确  
+    if (!this.data) {  
+      throw new Error('Packet data is null or undefined');  
+    }  
       
-    // 读取 VNT 协议头部  
-    this.protocol = view.getUint8(0);  
-    this.transportProtocol = view.getUint8(1);  
-    this.flags = view.getUint16(2, true); // little endian  
-    this.ttl = view.getUint8(4);  
-    this.source = view.getUint32(5, true);  
-    this.destination = view.getUint32(9, true);  
+    // 确保有有效的 ArrayBuffer  
+    let buffer;  
+    if (this.data.buffer) {  
+      buffer = this.data.buffer;  
+    } else if (this.data instanceof Uint8Array) {  
+      // 创建新的 ArrayBuffer 并复制数据  
+      buffer = new ArrayBuffer(this.data.length);  
+      new Uint8Array(buffer).set(this.data);  
+    } else if (this.data instanceof ArrayBuffer) {  
+      buffer = this.data;  
+    } else {  
+      throw new Error('Invalid data type for packet parsing: expected Uint8Array or ArrayBuffer');  
+    }  
       
-    this.offset = PACKET_HEADER_SIZE;  
+    // 安全检查：确保缓冲区足够大以包含协议头  
+    if (buffer.byteLength < 13) {  
+      throw new Error('Packet too short: minimum 13 bytes required for VNT header');  
+    }  
+      
+    const view = new DataView(buffer);  
+      
+    try {  
+      // 读取 VNT 协议头部 - 使用小端序  
+      this.protocol = view.getUint8(0);  
+      this.transportProtocol = view.getUint8(1);  
+      this.flags = view.getUint16(2, true); // little endian  
+      this.ttl = view.getUint8(4);  
+      this.source = view.getUint32(5, true);  
+      this.destination = view.getUint32(9, true);  
+        
+      this.offset = 13; // PACKET_HEADER_SIZE  
+        
+    } catch (error) {  
+      throw new Error(`Failed to parse VNT packet header: ${error.message}`);  
+    }  
   }  
   
   protocol() {  
@@ -59,10 +104,44 @@ export class NetPacket {
   }  
   
   incr_ttl() {  
+    // 安全检查：确保数据存在  
+    if (!this.data) {  
+      throw new Error('Cannot increment TTL: packet data is null');  
+    }  
+      
+    // 确保 TTL 值有效  
+    if (typeof this.ttl !== 'number' || this.ttl < 0) {  
+      throw new Error('Invalid TTL value');  
+    }  
+      
+    // 增加 TTL  
     this.ttl++;  
-    const view = new DataView(this.data.buffer);  
-    view.setUint8(4, this.ttl);  
-    return this.ttl;  
+      
+    // 确保有有效的 ArrayBuffer  
+    let buffer;  
+    if (this.data.buffer) {  
+      buffer = this.data.buffer;  
+    } else if (this.data instanceof Uint8Array) {  
+      buffer = new ArrayBuffer(this.data.length);  
+      new Uint8Array(buffer).set(this.data);  
+    } else if (this.data instanceof ArrayBuffer) {  
+      buffer = this.data;  
+    } else {  
+      throw new Error('Invalid data type for packet modification');  
+    }  
+      
+    // 安全检查：确保缓冲区足够大  
+    if (buffer.byteLength < 5) {  
+      throw new Error('Packet too short to modify TTL');  
+    }  
+      
+    try {  
+      const view = new DataView(buffer);  
+      view.setUint8(4, this.ttl);  
+      return this.ttl;  
+    } catch (error) {  
+      throw new Error(`Failed to increment TTL: ${error.message}`);  
+    }  
   }  
   
   buffer() {  
@@ -73,5 +152,49 @@ export class NetPacket {
     const totalSize = PACKET_HEADER_SIZE + size + ENCRYPTION_RESERVED;  
     const buffer = new Uint8Array(totalSize);  
     return new NetPacket(buffer);  
+  }  
+  
+  // 安全获取 ArrayBuffer 的辅助方法  
+  _getArrayBuffer() {  
+    if (!this.data) {  
+      throw new Error('Packet data is null');  
+    }  
+      
+    if (this.data.buffer) {  
+      return this.data.buffer;  
+    } else if (this.data instanceof Uint8Array) {  
+      const buffer = new ArrayBuffer(this.data.length);  
+      new Uint8Array(buffer).set(this.data);  
+      return buffer;  
+    } else if (this.data instanceof ArrayBuffer) {  
+      return this.data;  
+    } else {  
+      throw new Error('Invalid data type');  
+    }  
+  }  
+  
+  // 验证数据包完整性  
+  validate() {  
+    if (!this.data) {  
+      throw new Error('Packet data is null');  
+    }  
+      
+    if (typeof this.protocol !== 'number') {  
+      throw new Error('Invalid protocol field');  
+    }  
+      
+    if (typeof this.transportProtocol !== 'number') {  
+      throw new Error('Invalid transport protocol field');  
+    }  
+      
+    if (typeof this.source !== 'number' || this.source < 0) {  
+      throw new Error('Invalid source address');  
+    }  
+      
+    if (typeof this.destination !== 'number' || this.destination < 0) {  
+      throw new Error('Invalid destination address');  
+    }  
+      
+    return true;  
   }  
 }

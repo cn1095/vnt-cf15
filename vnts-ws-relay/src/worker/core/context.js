@@ -1,5 +1,4 @@
-import { Ipv4Addr } from './utils.js';  
-  
+ 
 /**  
  * VNT 连接上下文  
  * 对应 Rust 中的 VntContext 结构体  

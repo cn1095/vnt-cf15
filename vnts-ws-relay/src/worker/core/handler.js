@@ -1,7 +1,7 @@
 import { NetPacket } from './packet.js';  
 import { PROTOCOL, TRANSPORT_PROTOCOL, ENCRYPTION_RESERVED } from './constants.js';  
 import { VntContext, AppCache, NetworkInfo, ClientInfo, Ipv4Addr } from './context.js';  
-import { AesCipher, randomU64String } from './crypto.js';  
+import { AesGcmCipher, randomU64String } from './crypto.js';  
   
 export class PacketHandler {  
   constructor(env) {  
