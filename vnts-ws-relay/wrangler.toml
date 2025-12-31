@@ -9,10 +9,6 @@ WS_PATH = "ws"
 # VNT 特定配置  
 VNT_DISABLE_RELAY = "0"  
   
-# 网络配置  
-NETWORK_NAME = "default"  
-NETWORK_SECRET = ""  
-  
 # 性能设置  
 MAX_CONNECTIONS_PER_ROOM = "100"  
 HEARTBEAT_INTERVAL = "30"  
