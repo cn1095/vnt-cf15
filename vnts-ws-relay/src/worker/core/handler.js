@@ -19,6 +19,8 @@ export class PacketHandler {
     this.env = env;
     this.cache = new AppCache();
     this.cache.networks = new Map();
+    this.cachedEpoch = 0;  
+  this.lastEpochUpdate = 0;
   }
   calculateGateway(networkInfo) {
     // 网关是网段的 .1 地址
@@ -274,8 +276,8 @@ export class PacketHandler {
     ttl: 64, // 标准 TTL 值  
     protocol: 1, // ICMP  
     headerChecksum: 0,  
-    sourceIp: destination, // 源和目标交换  
-    destIp: source,  
+    sourceIp: this.formatIp(destination), // 字符串格式  
+destIp: this.formatIp(source),       // 字符串格式  
     payload: this.serializeIcmpPacket(responseIcmp),  
   };  
   
@@ -561,6 +563,47 @@ export class PacketHandler {
       );
     }
   }
+  createDeviceUpdatePacket(networkInfo) {  
+  const deviceInfoList = Array.from(networkInfo.clients.values())  
+    .filter((client) => client.virtual_ip !== 0)  
+    .map((client) => ({  
+      name: client.name,  
+      virtual_ip: client.virtual_ip,  
+      device_status: client.online ? 0 : 1,  
+      client_secret: false,  
+      client_secret_hash: new Uint8Array(0),  
+      wireguard: false,  
+    }));  
+  
+  const responseData = {  
+    device_info_list: deviceInfoList,  
+    epoch: networkInfo.epoch,  
+    update_type: "device_list_update"  
+  };  
+  
+  const responseBytes = this.encodeRegistrationResponse(responseData);  
+  const response = NetPacket.new(responseBytes.length);  
+    
+  response.set_protocol(PROTOCOL.SERVICE);  
+  response.set_transport_protocol(TRANSPORT_PROTOCOL.DeviceListUpdate);  
+  response.set_payload(responseBytes);  
+    
+  return response;  
+}
+async notifyClientsUpdate(networkInfo, newClientIp) {  
+  const updatePacket = this.createDeviceUpdatePacket(networkInfo);  
+    
+  // 向所有已连接的客户端发送更新  
+  for (const [ip, client] of networkInfo.clients) {  
+    if (ip !== newClientIp && client.tcp_sender) {  
+      try {  
+        await client.tcp_sender.send(updatePacket.buffer().to_vec());  
+      } catch (error) {  
+        console.error(`通知客户端 ${ip} 失败:`, error);  
+      }  
+    }  
+  }  
+}
 
   async handleRegistration(context, packet, addr, tcpSender) {
     console.log(`[DEBUG] Registration request received`);
@@ -602,8 +645,8 @@ export class PacketHandler {
       });
 
       // 添加到网络
-      networkInfo.clients.set(virtualIp, clientInfo);
       networkInfo.epoch += 1;
+      networkInfo.clients.set(virtualIp, clientInfo);
       // 保存网络信息引用
       this.currentNetworkInfo = networkInfo;
 
@@ -617,6 +660,8 @@ export class PacketHandler {
 
       // 创建注册响应
       const response = this.createRegistrationResponse(virtualIp, networkInfo);
+      // 通知其他客户端有新设备加入  
+  await this.notifyClientsUpdate(networkInfo, virtualIp);
       console.log(
         `[DEBUG] Sending registration response: IP=${this.formatIp(
           virtualIp
@@ -629,39 +674,39 @@ export class PacketHandler {
     }
   }
 
-  async handlePing(packet, linkContext) {  
-    // 读取客户端发送的原始时间戳（不要生成新的）  
-    const payload = packet.payload();  
-    const clientTime = (payload[0] << 8) | payload[1];  
-      
-    // 创建 Pong 响应，保持客户端的时间戳  
-    const pongPacket = this.createPongPacket(packet, clientTime, linkContext);  
-    return pongPacket;  
+getCachedEpoch() {  
+  if (!this.cachedEpoch || Date.now() - this.lastEpochUpdate > 5000) {  
+    this.cachedEpoch = this.getCurrentEpoch();  
+    this.lastEpochUpdate = Date.now();  
+  }  
+  return this.cachedEpoch;  
+}
+  async handlePing(packet, linkContext) {    
+  // 直接读取时间戳，避免额外计算  
+  const payload = packet.payload();    
+  const clientTime = (payload[0] << 8) | payload[1];  
+    
+  // 保持linkContext参数，但立即返回  
+  return this.createPongPacket(packet, clientTime, linkContext);  
 }
 
-  createPongPacket(pingPacket, currentTime) {
-    // 使用非加密包，避免数据长度问题
-    const packet = NetPacket.new(4); // 4字节载荷
-
-    // 设置协议头
-    packet.set_protocol(PROTOCOL.CONTROL);
-    packet.set_transport_protocol(TRANSPORT_PROTOCOL.Pong);
-    packet.set_source(pingPacket.destination);
-    packet.set_destination(pingPacket.source);
-
-    // 创建4字节载荷
-    const payload = new Uint8Array(4);
-    const view = new DataView(payload.buffer);
-
-    // 设置时间戳和epoch
-    view.setUint16(0, currentTime & 0xffff, false); // 时间戳
-    view.setUint16(2, this.getCurrentEpoch() & 0xffff, false); // epoch
-
-    // 设置载荷
-    packet.set_payload(payload);
-
-    return packet;
-  }
+  createPongPacket(pingPacket, clientTime, linkContext) {  
+  const packet = NetPacket.new(4);  
+  packet.set_protocol(PROTOCOL.CONTROL);  
+  packet.set_transport_protocol(TRANSPORT_PROTOCOL.Pong);  
+  packet.set_source(pingPacket.destination);  
+  packet.set_destination(pingPacket.source);  
+  
+  // 直接操作字节数组，避免DataView开销  
+  const payload = new Uint8Array(4);  
+  payload[0] = (clientTime >> 8) & 0xff;  
+  payload[1] = clientTime & 0xff;  
+  payload[2] = (this.getCachedEpoch() >> 8) & 0xff;  
+  payload[3] = this.getCachedEpoch() & 0xff;  
+  
+  packet.set_payload(payload);  
+  return packet;  
+}
 
   // 获取当前epoch
   getCurrentEpoch() {
@@ -841,7 +886,7 @@ export class PacketHandler {
   }
 
   createHandshakeResponse(request) {
-    const clientVersion = request.version || "1.2.16";
+    const clientVersion = request.version || "cloudflare";
 
     const responseData = {
       version: clientVersion,
@@ -862,50 +907,65 @@ export class PacketHandler {
     return response;
   }
 
-  createRegistrationResponse(virtualIp, networkInfo) {
-  	console.log(`[调试] 当前网络客户端数量: ${networkInfo.clients.size}`);  
-  console.log(`[调试] 本机IP: ${this.formatIp(virtualIp)}`);
-  // 打印所有客户端信息  
-  for (const [ip, client] of networkInfo.clients) {  
-    console.log(`[调试] 客户端 IP: ${this.formatIp(ip)}, 在线: ${client.online}`);  
-  }
-    const responseData = {
-      virtual_ip: virtualIp,
-      virtual_gateway: networkInfo.gateway,
-      virtual_netmask: networkInfo.netmask,
-      epoch: networkInfo.epoch,
-      // 过滤掉客户端
-      device_info_list: Array.from(networkInfo.clients.values())  
-      .filter((client) => client.virtual_ip !== 0 && client.virtual_ip !== virtualIp) // 排除本机  
-      .map((client) => ({  
-        name: client.name,  
-        virtual_ip: client.virtual_ip,  
-        device_status: client.online ? 0 : 1, // 离线显示为 1  
-        client_secret: false,  
-        client_secret_hash: new Uint8Array(0),  
-        wireguard: false,  
-      })),  
-    public_ip: networkInfo.public_ip,  
-    public_port: networkInfo.public_port,  
-    public_ipv6: new Uint8Array(0),  
-  };
-
-    const responseBytes = this.encodeRegistrationResponse(responseData);
-    const response = NetPacket.new(responseBytes.length);
-    response.set_default_version();
-
-    response.set_protocol(PROTOCOL.SERVICE);
-    response.set_transport_protocol(TRANSPORT_PROTOCOL.RegistrationResponse);
-
-    response.set_source(networkInfo.gateway); // 设置源地址为网关
-    response.set_destination(0xffffffff); // 设置目标地址为客户端
-    response.set_gateway_flag(true); // 设置网关标志
-    response.first_set_ttl(15);
-
-    response.set_payload(responseBytes);
-
-    return response;
-  }
+  createRegistrationResponse(virtualIp, networkInfo) {  
+  console.log(`[调试] 当前网络客户端数量: ${networkInfo.clients.size}`);    
+  console.log(`[调试] 当前客户端IP: ${this.formatIp(virtualIp)}`);  
+    
+  // 明确添加网关信息  
+  const gatewayInfo = {  
+    name: "服务器",  
+    virtual_ip: networkInfo.gateway,  
+    device_status: 0, // 网关始终在线  
+    client_secret: false,  
+    client_secret_hash: new Uint8Array(0),  
+    wireguard: false,  
+  };  
+    
+  // 客户端信息列表（排除本机）  
+  const clientInfoList = Array.from(networkInfo.clients.values())  
+    .filter((client) =>   
+      client.virtual_ip !== 0 &&   
+      client.virtual_ip !== virtualIp  
+    )  
+    .map((client) => ({    
+      name: client.name,    
+      virtual_ip: client.virtual_ip,    
+      device_status: client.online ? 0 : 1,  
+      client_secret: false,    
+      client_secret_hash: new Uint8Array(0),    
+      wireguard: false,  
+    }));  
+  
+  // 将网关信息放在第一位  
+  const deviceInfoList = [gatewayInfo, ...clientInfoList];  
+  
+  const responseData = {  
+    virtual_ip: virtualIp,  
+    virtual_gateway: networkInfo.gateway,  
+    virtual_netmask: networkInfo.netmask,  
+    epoch: networkInfo.epoch,  
+    device_info_list: deviceInfoList,  
+    public_ip: networkInfo.public_ip,    
+    public_port: networkInfo.public_port,    
+    public_ipv6: new Uint8Array(0),    
+  };  
+  
+  const responseBytes = this.encodeRegistrationResponse(responseData);  
+  const response = NetPacket.new(responseBytes.length);  
+  response.set_default_version();  
+  
+  response.set_protocol(PROTOCOL.SERVICE);  
+  response.set_transport_protocol(TRANSPORT_PROTOCOL.RegistrationResponse);  
+  
+  response.set_source(networkInfo.gateway); // 设置源地址为网关  
+  response.set_destination(0xffffffff); // 设置目标地址为客户端  
+  response.set_gateway_flag(true); // 设置网关标志  
+  response.first_set_ttl(15);  
+  
+  response.set_payload(responseBytes);  
+  
+  return response;  
+}
 
   // 协议解析方法
   parseHandshakeRequest(payload) {

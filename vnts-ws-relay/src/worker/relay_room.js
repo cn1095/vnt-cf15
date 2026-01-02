@@ -10,6 +10,8 @@ export class RelayRoom {
     this.env = env;
     this.connections = new Map();
     this.contexts = new Map();
+    this.p2p_connections = new Map();  
+    this.connection_last_update = new Map();
     this.packetHandler = new PacketHandler(env);
 
     // 心跳管理
@@ -18,7 +20,109 @@ export class RelayRoom {
 
     // 连接信息存储
     this.connectionInfos = new Map();
+    
   }
+  // 获取网关IP地址  
+  getGatewayIp(clientId) {  
+    const context = this.contexts.get(clientId);  
+    if (context && context.link_context && context.link_context.network_info) {  
+      return context.link_context.network_info.gateway;  
+    }  
+    return null;  
+  }  
+  async handleGatewayPing(clientId, data) {  
+  try {  
+    console.log(`[调试] 开始处理系统ping包`);  
+      
+    const packet = NetPacket.parse(data);  
+    const context = this.contexts.get(clientId);  
+      
+    if (!context || !context.link_context) {  
+      console.log(`[调试] 客户端上下文不存在`);  
+      return null;  
+    }  
+      
+    const source = packet.source;  
+    const destination = packet.destination;  
+    const ipv4Data = packet.payload;  
+      
+    // 尝试解析IPv4包  
+    const ipv4Packet = this.packetHandler.parseIpv4Packet(ipv4Data);  
+      
+    if (!ipv4Packet) {  
+      console.log(`[调试] 非标准IPv4包，创建简单响应`);  
+      // 创建简单的ping响应包  
+      return this.createSimplePingResponse(packet, source, destination);  
+    }  
+      
+    // 标准IPv4 ICMP处理  
+    const icmpPacket = this.packetHandler.parseIcmpPacket(ipv4Packet.payload);  
+    if (!icmpPacket || icmpPacket.type !== 8) {  
+      return null;  
+    }  
+      
+    return this.packetHandler.createPingResponse(  
+      packet,  
+      source,  
+      destination,  
+      ipv4Packet,  
+      icmpPacket  
+    );  
+  } catch (error) {  
+    console.error(`[调试] 处理系统ping失败:`, error);  
+    return null;  
+  }  
+}  
+  
+// 添加简单ping响应方法  
+createSimplePingResponse(packet, source, destination) {  
+  const response = NetPacket.new(4);  
+  response.set_protocol(4); // IPTURN协议  
+  response.set_transport_protocol(4); // 传输协议4  
+  response.set_source(destination); // 网关地址  
+  response.set_destination(source); // 客户端地址  
+  response.set_gateway_flag(true);  
+    
+  // 简单的响应载荷  
+  const payload = new Uint8Array(4);  
+  payload[0] = 0; // Echo Reply类型  
+  payload[1] = 0; // Code  
+  payload[2] = 0; // 校验和高位  
+  payload[3] = 0; // 校验和低位  
+    
+  response.set_payload(payload);  
+  return response;  
+}
+  // 更新P2P连接状态  
+  updateP2PStatus(clientId, p2pTargets) {  
+    this.p2p_connections.set(clientId, new Set(p2pTargets));  
+    this.connection_last_update.set(clientId, Date.now());  
+  }  
+  
+  // 检查是否有P2P连接  
+  hasP2PConnection(sourceId, targetIp) {  
+    const sourceP2P = this.p2p_connections.get(sourceId);  
+    if (!sourceP2P) return false;  
+      
+    // 查找目标客户端ID  
+    for (const [clientId, context] of this.contexts) {  
+      if (context.virtual_ip === targetIp) {  
+        return sourceP2P.has(clientId);  
+      }  
+    }  
+    return false;  
+  } 
+  // 处理客户端 P2P 状态报告  
+handleP2PStatusReport(clientId, p2pList) {  
+  const p2pTargets = [];  
+  for (const targetInfo of p2pList) {  
+    const targetClientId = this.findClientByIp(targetInfo.target_ip);  
+    if (targetClientId) {  
+      p2pTargets.push(targetClientId);  
+    }  
+  }  
+  this.updateP2PStatus(clientId, p2pTargets);  
+}  
 
   async fetch(request) {
     const url = new URL(request.url);
@@ -107,48 +211,27 @@ export class RelayRoom {
       }, 300000); // 5分钟
     }
   }
-  createVNTHeartbeat() {
-    // 创建包含载荷的CONTROL协议ping包
-    const payload = new Uint8Array(4); // 2字节时间 + 2字节纪元
-    const view = new DataView(payload.buffer);
-
-    // 设置当前时间（低16位）
-    const currentTime = Date.now() & 0xffff;
-    view.setUint16(0, currentTime, false); // 大端序
-
-    // 设置纪元（可以从连接信息获取）
-    view.setUint16(2, 0, false); // 纪元，暂时设为0
-
-    const packet = NetPacket.new(payload.length);
-    packet.set_protocol(PROTOCOL.CONTROL);
-    packet.set_transport_protocol(TRANSPORT_PROTOCOL.Ping);
-    packet.set_source(0x0a240001); // 网关地址 10.36.0.1
-    packet.set_destination(0xffffffff); // 广播地址
-    packet.first_set_ttl(5);
-    packet.set_gateway_flag(true);
-    packet.set_payload(payload); // 设置正确的载荷
-
-    return packet.buffer();
-  }
+ 
   // 启动心跳机制
-  startHeartbeat(clientId) {
-    const server = this.connections.get(clientId);
-    if (!server) return;
-
-    const heartbeatId = setInterval(() => {
-      try {
-        // 发送VNT心跳包而不是仅检查状态
-        const heartbeatPacket = this.createVNTHeartbeat();
-        server.send(heartbeatPacket);
-        console.log(`[调试] 发送VNT心跳包到: ${clientId}`);
-      } catch (error) {
-        console.error(`[调试] 心跳失败 ${clientId}:`, error);
-        this.handleClose(clientId);
-      }
-    }, 3000); // 每3秒发送一次，匹配客户端期望
-
-    this.heartbeatTimers.set(clientId, heartbeatId);
-  }
+  startHeartbeat(clientId) {  
+  const server = this.connections.get(clientId);  
+  if (!server) return;  
+  
+  const heartbeatId = setInterval(() => {  
+    try {  
+      // 只检查连接状态，不主动发送心跳包  
+      if (server.readyState !== WebSocket.OPEN) {  
+        console.log(`[调试] 连接 ${clientId} 已断开`);  
+        this.handleClose(clientId);  
+      }  
+    } catch (error) {  
+      console.error(`[调试] 心跳检查失败 ${clientId}:`, error);  
+      this.handleClose(clientId);  
+    }  
+  }, 30000); // 每30秒检查一次连接状态  
+  
+  this.heartbeatTimers.set(clientId, heartbeatId);  
+}
 
   // 更新最后活动时间
   updateLastActivity(clientId) {
@@ -181,25 +264,22 @@ export class RelayRoom {
   }
 
   // 快速转发判断
-  shouldFastForward(data) {  
-  if (!data || data.length < 12) return false;  
-  
-  const protocol = data[1];  
-  const transport = data[2];  
-  
-  // 扩大快速路径范围  
-  return (  
-    // IPTURN 数据包（最常见）  
-    (protocol === 4 && transport === 4) ||  
-    // IPTURN IPv4 数据包（包含 ICMP ping）  
-    (protocol === 4 && transport === 1) ||  
-    // WGIpv4 数据包  
-    (protocol === 4 && transport === 2) ||  
-    // Ipv4Broadcast 数据包  
+  shouldFastForward(data) {    
+  if (!data || data.length < 12) return false;    
+    
+  const protocol = data[1];    
+  const transport = data[2];    
+    
+  return (    
+    // IPTURN 数据包（最常见）    
+    (protocol === 4 && transport === 4) ||    
+    // WGIpv4 数据包    
+    (protocol === 4 && transport === 2) ||    
+    // Ipv4Broadcast 数据包    
     (protocol === 4 && transport === 3) ||  
-    // 部分 CONTROL 协议包（ping/pong）  
-    (protocol === 3 && (transport === 1 || transport === 2))  
-  );  
+    // 注意：移除 IPTURN IPv4（ICMP ping）包  
+    false  
+  );    
 }
 
   // 需要完整解析的包
@@ -267,28 +347,61 @@ export class RelayRoom {
     }  
   
     // 更新活动时间  
-    this.updateLastActivity(clientId);  
+    this.updateLastActivity(clientId);
+    const protocol = uint8Data[1];    
+    const transport = uint8Data[2];   
+    
+    // 检测传输协议4的ping包  
+if (protocol === 4 && transport === 4) {  
+  console.log(`[调试] 检测到传输协议4包，目标=${this.packetHandler.formatIp(uint8Data[8]<<24|uint8Data[9]<<16|uint8Data[10]<<8|uint8Data[11])}`); 
+  // 检查是否为ping网关的包  
+  const header = parseVNTHeaderFast(uint8Data);  
+  if (header && header.destination) {  
+    const gatewayIp = this.getGatewayIp(clientId);  
+    if (header.destination === gatewayIp) {  
+      console.log(`[调试] 检测到ping网关（传输协议4），直接响应`);  
+      return await this.handleGatewayPing(clientId, uint8Data);  
+    }  
+  }  
+} 
   
     // 优先检查快速转发  
     if (this.shouldFastForward(uint8Data)) {  
       const protocol = uint8Data[1];  
       const transport = uint8Data[2];  
       console.log(`[调试] 快速转发: 协议=${protocol}, 传输=${transport}`);  
+        
+      // 在快速转发中也检查 P2P 连接  
+      const header = parseVNTHeaderFast(uint8Data);  
+      if (header && header.destination) {  
+        if (this.hasP2PConnection(clientId, header.destination)) {  
+          console.log(`[调试] 快速路径: ${clientId} 到 ${header.destination} 有P2P连接，跳过中继`);  
+          return;  
+        }  
+      }  
+        
       return await this.fastForward(clientId, uint8Data);  
     }  
   
-    // 其他逻辑保持不变...  
+    // 完整解析路径  
     const header = parseVNTHeaderFast(uint8Data);  
-      
+        
     if (!header) {  
       return await this.fullParsingPath(clientId, uint8Data);  
     }  
   
-    // 数据包 0 拷贝转发（排除 ICMP 包）  
+    // 数据包智能处理 - 参照 vnts 的优先 P2P 逻辑  
     if (header.isDataPacket && !(uint8Data[1] === 4 && uint8Data[2] === 1)) {  
       const targetIp = header.destination;  
-      const targetClient = this.findClientByIp(targetIp);  
         
+      // 优先检查 P2P 连接 - 类似 vnts 的 route_one_p2p 逻辑  
+      if (this.hasP2PConnection(clientId, targetIp)) {  
+        console.log(`[调试] ${clientId} 到 ${targetIp} 有P2P连接，跳过中继`);  
+        return; // 让客户端直连，不中继  
+      }  
+        
+      // 没有 P2P 连接，尝试直接转发  
+      const targetClient = this.findClientByIp(targetIp);  
       if (targetClient && targetClient !== clientId) {  
         const server = this.connections.get(targetClient);  
         if (server && server.readyState === WebSocket.OPEN) {  
@@ -297,6 +410,7 @@ export class RelayRoom {
         }  
       }  
         
+      // 目标不在线或无法直连，才考虑服务器中继  
       if (this.env.VNT_DISABLE_RELAY !== "1") {  
         return await this.relayPacket(clientId, uint8Data, header);  
       }  
@@ -307,12 +421,18 @@ export class RelayRoom {
       return await this.fullParsingPath(clientId, uint8Data);  
     }  
   
-    // 其他情况默认广播  
+    // 其他情况默认广播（但也要检查 P2P）  
+    if (header.destination) {  
+      if (this.hasP2PConnection(clientId, header.destination)) {  
+        console.log(`[调试] 广播路径: ${clientId} 到 ${header.destination} 有P2P连接，跳过中继`);  
+        return;  
+      }  
+    }  
     return await this.fastForward(clientId, uint8Data);  
   } catch (error) {  
     console.error(`[调试] 处理 ${clientId} 消息时出错:`, error);  
   }  
-}
+}  
   
 // 辅助函数：根据 IP 查找客户端  
 findClientByIp(targetIp) {  
@@ -343,36 +463,64 @@ findClientByIp(targetIp) {
   }
 
   // 完整解析路径（保持 VNT 兼容性）
-  async fullParsingPath(clientId, data) {
-    const packet = NetPacket.parse(data);
-    const context = this.contexts.get(clientId);
-    const addr = this.parseClientAddress({ cf: { colo: "unknown" } });
+  async fullParsingPath(clientId, data) {  
+  const packet = NetPacket.parse(data);  
+  const context = this.contexts.get(clientId);  
+  const addr = this.parseClientAddress({ cf: { colo: "unknown" } });  
+  
+  console.log(`[DEBUG] Full VNT parsing for ${clientId}`);  
+  console.log(  
+    `[DEBUG] Packet protocol: ${packet.protocol}, transport: ${packet.transportProtocol}`  
+  );  
+  
+  // 检查是否是 P2P 状态报告包  
+  if (packet.protocol === PROTOCOL.SERVICE &&   
+      packet.transportProtocol === TRANSPORT_PROTOCOL.RegistrationRequest) {  
+    try {  
+      const payload = packet.get_payload();  
+      if (payload && payload.p2p_status) {  
+        this.handleP2PStatusReport(clientId, payload.p2p_status);  
+      }  
+    } catch (e) {  
+      // 忽略解析错误  
+    }  
+  }  
+  
+  const response = await this.packetHandler.handle(  
+    context,  
+    packet,  
+    addr,  
+    clientId  
+  );  
+  
+  if (response) {  
+    const server = this.connections.get(clientId);  
+    if (server && server.readyState === WebSocket.OPEN) {  
+      server.send(response.buffer());  
+    }  
+  }  
+  
+  // VNT 协议的广播逻辑 - 添加 P2P 检查  
+  if (this.shouldBroadcast(packet)) {  
+    // 检查广播目标是否有 P2P 连接  
+    if (packet.destination && this.hasP2PConnection(clientId, packet.destination)) {  
+      console.log(`[调试] 广播包 ${clientId} 到 ${packet.destination} 有P2P连接，跳过服务器广播`);  
+      return;  
+    }  
+    await this.broadcastPacket(clientId, packet);  
+  }  
+}
 
-    console.log(`[DEBUG] Full VNT parsing for ${clientId}`);
-    console.log(
-      `[DEBUG] Packet protocol: ${packet.protocol}, transport: ${packet.transportProtocol}`
-    );
-
-    const response = await this.packetHandler.handle(
-      context,
-      packet,
-      addr,
-      clientId
-    );
-
-    if (response) {
-      const server = this.connections.get(clientId);
-      if (server && server.readyState === WebSocket.OPEN) {
-        server.send(response.buffer());
-      }
-    }
-
-    // VNT 协议的广播逻辑
-    if (this.shouldBroadcast(packet)) {
-      await this.broadcastPacket(clientId, packet);
-    }
-  }
-
+buildHandshakeResponse(clientId) {  
+  const context = this.contexts.get(clientId);  
+  const response = {  
+    // ... 原有字段  
+    p2p_targets: Array.from(this.p2p_connections.get(clientId) || []),  
+    request_p2p_status: true, // 请求客户端报告 P2P 状态  
+    server_p2p_support: true  // 服务器支持 P2P 智能判断  
+  };  
+  return response;  
+}
   // 基于头部的转发
   async headerBasedForward(clientId, data, header) {
     console.log(`[DEBUG] Header-based forwarding from ${clientId}`);
