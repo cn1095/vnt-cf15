@@ -3,6 +3,7 @@ import { VntContext } from "./core/context.js";
 import { PacketHandler } from "./core/handler.js";
 import { PROTOCOL, TRANSPORT_PROTOCOL } from "./core/constants.js";
 import { parseVNTHeaderFast } from "./utils/fast_parser.js";
+import { logger } from "./core/logger.js";
 
 export class RelayRoom {
   constructor(state, env) {
@@ -30,69 +31,102 @@ export class RelayRoom {
     }  
     return null;  
   }  
-  async handleGatewayPing(clientId, data) {  
+  async handleGatewayPing(clientId, uint8Data) {  
   try {  
-    console.log(`[调试] 开始处理系统ping包`);  
+    logger.debug(`开始处理系统ping包`);  
       
-    const packet = NetPacket.parse(data);  
-    const context = this.contexts.get(clientId);  
+    // 直接修改原始数据包  
+    const modifiedData = new Uint8Array(uint8Data);  
       
-    if (!context || !context.link_context) {  
-      console.log(`[调试] 客户端上下文不存在`);  
-      return null;  
-    }  
+    // 正确解析VNT头部的源和目标地址  
+    const source = (modifiedData[4] << 24) | (modifiedData[5] << 16) |   
+                   (modifiedData[6] << 8) | modifiedData[7];  
+    const destination = (modifiedData[8] << 24) | (modifiedData[9] << 16) |   
+                        (modifiedData[10] << 8) | modifiedData[11];  
       
-    const source = packet.source;  
-    const destination = packet.destination;  
-    const ipv4Data = packet.payload;  
+    console.log(`[调试] 源地址: ${this.packetHandler.formatIp(source)}`);  
+    console.log(`[调试] 目标地址: ${this.packetHandler.formatIp(destination)}`);  
       
-    // 尝试解析IPv4包  
-    const ipv4Packet = this.packetHandler.parseIpv4Packet(ipv4Data);  
+    // 交换VNT头部的源和目标地址  
+    modifiedData[4] = (destination >> 24) & 0xff;  // 新源地址（原目标）  
+    modifiedData[5] = (destination >> 16) & 0xff;  
+    modifiedData[6] = (destination >> 8) & 0xff;  
+    modifiedData[7] = destination & 0xff;  
+    modifiedData[8] = (source >> 24) & 0xff;     // 新目标地址（原源）  
+    modifiedData[9] = (source >> 16) & 0xff;  
+    modifiedData[10] = (source >> 8) & 0xff;  
+    modifiedData[11] = source & 0xff;  
       
-    if (!ipv4Packet) {  
-      console.log(`[调试] 非标准IPv4包，创建简单响应`);  
-      // 创建简单的ping响应包  
-      return this.createSimplePingResponse(packet, source, destination);  
-    }  
+    console.log(`[调试] VNT头部地址已交换`);  
       
-    // 标准IPv4 ICMP处理  
-    const icmpPacket = this.packetHandler.parseIcmpPacket(ipv4Packet.payload);  
-    if (!icmpPacket || icmpPacket.type !== 8) {  
-      return null;  
-    }  
+    // 修改IPv4头部的源和目标地址  
+    const ipv4HeaderStart = 12;  
+    modifiedData[ipv4HeaderStart + 12] = (destination >> 24) & 0xff;  
+    modifiedData[ipv4HeaderStart + 13] = (destination >> 16) & 0xff;  
+    modifiedData[ipv4HeaderStart + 14] = (destination >> 8) & 0xff;  
+    modifiedData[ipv4HeaderStart + 15] = destination & 0xff;  
+    modifiedData[ipv4HeaderStart + 16] = (source >> 24) & 0xff;  
+    modifiedData[ipv4HeaderStart + 17] = (source >> 16) & 0xff;  
+    modifiedData[ipv4HeaderStart + 18] = (source >> 8) & 0xff;  
+    modifiedData[ipv4HeaderStart + 19] = source & 0xff;  
       
-    return this.packetHandler.createPingResponse(  
-      packet,  
-      source,  
-      destination,  
-      ipv4Packet,  
-      icmpPacket  
-    );  
+    // 修改ICMP类型为Echo Reply (0)  
+    const icmpStart = ipv4HeaderStart + 20;  
+    console.log(`[调试] 原始ICMP类型: ${modifiedData[icmpStart]}`);  
+    modifiedData[icmpStart] = 0;  
+    console.log(`[调试] 修改后ICMP类型: ${modifiedData[icmpStart]}`);  
+      
+    // 重新计算校验和  
+    modifiedData[icmpStart + 2] = 0;  
+    modifiedData[icmpStart + 3] = 0;  
+    const icmpData = modifiedData.slice(icmpStart);  
+    const icmpChecksum = this.calculateIcmpChecksum(icmpData);  
+    modifiedData[icmpStart + 2] = (icmpChecksum >> 8) & 0xff;  
+    modifiedData[icmpStart + 3] = icmpChecksum & 0xff;  
+    console.log(`[调试] ICMP校验和: 0x${icmpChecksum.toString(16)}`);  
+      
+    modifiedData[ipv4HeaderStart + 10] = 0;  
+    modifiedData[ipv4HeaderStart + 11] = 0;  
+    const ipv4Header = modifiedData.slice(ipv4HeaderStart, icmpStart);  
+    const ipv4Checksum = this.calculateIpv4Checksum(ipv4Header);  
+    modifiedData[ipv4HeaderStart + 10] = (ipv4Checksum >> 8) & 0xff;  
+    modifiedData[ipv4HeaderStart + 11] = ipv4Checksum & 0xff;  
+    console.log(`[调试] IPv4校验和: 0x${ipv4Checksum.toString(16)}`);  
+      
+    console.log(`[调试] 响应包长度: ${modifiedData.length}`);  
+    logger.info(`[调试] 响应包内容: ${Array.from(modifiedData).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);  
+      
+    return { buffer: () => modifiedData };  
   } catch (error) {  
-    console.error(`[调试] 处理系统ping失败:`, error);  
+    console.error("处理网关ping失败:", error);  
     return null;  
   }  
 }  
   
-// 添加简单ping响应方法  
-createSimplePingResponse(packet, source, destination) {  
-  const response = NetPacket.new(4);  
-  response.set_protocol(4); // IPTURN协议  
-  response.set_transport_protocol(4); // 传输协议4  
-  response.set_source(destination); // 网关地址  
-  response.set_destination(source); // 客户端地址  
-  response.set_gateway_flag(true);  
-    
-  // 简单的响应载荷  
-  const payload = new Uint8Array(4);  
-  payload[0] = 0; // Echo Reply类型  
-  payload[1] = 0; // Code  
-  payload[2] = 0; // 校验和高位  
-  payload[3] = 0; // 校验和低位  
-    
-  response.set_payload(payload);  
-  return response;  
-}
+// 添加原始buffer的校验和计算方法  
+ // 添加校验和计算方法  
+  calculateIcmpChecksum(data) {  
+    let sum = 0;  
+    for (let i = 0; i < data.length - 1; i += 2) {  
+      sum += (data[i] << 8) | data[i + 1];  
+    }  
+    if (data.length % 2 === 1) {  
+      sum += data[data.length - 1] << 8;  
+    }  
+    sum = (sum >> 16) + (sum & 0xffff);  
+    sum += sum >> 16;  
+    return ~sum & 0xffff;  
+  }  
+  
+  calculateIpv4Checksum(header) {  
+    let sum = 0;  
+    for (let i = 0; i < 20; i += 2) {  
+      sum += (header[i] << 8) | header[i + 1];  
+    }  
+    sum = (sum >> 16) + (sum & 0xffff);  
+    sum += sum >> 16;  
+    return ~sum & 0xffff;  
+  }  
   // 更新P2P连接状态  
   updateP2PStatus(clientId, p2pTargets) {  
     this.p2p_connections.set(clientId, new Set(p2pTargets));  
@@ -352,18 +386,27 @@ handleP2PStatusReport(clientId, p2pList) {
     const transport = uint8Data[2];   
     
     // 检测传输协议4的ping包  
-if (protocol === 4 && transport === 4) {  
-  console.log(`[调试] 检测到传输协议4包，目标=${this.packetHandler.formatIp(uint8Data[8]<<24|uint8Data[9]<<16|uint8Data[10]<<8|uint8Data[11])}`); 
-  // 检查是否为ping网关的包  
-  const header = parseVNTHeaderFast(uint8Data);  
-  if (header && header.destination) {  
-    const gatewayIp = this.getGatewayIp(clientId);  
-    if (header.destination === gatewayIp) {  
-      console.log(`[调试] 检测到ping网关（传输协议4），直接响应`);  
-      return await this.handleGatewayPing(clientId, uint8Data);  
-    }  
-  }  
-} 
+if (protocol === 4 && transport === 4) {    
+  console.log(`[调试] 检测到传输协议4包，目标=${this.packetHandler.formatIp(uint8Data[8]<<24|uint8Data[9]<<16|uint8Data[10]<<8|uint8Data[11])}`);   
+  const header = parseVNTHeaderFast(uint8Data);    
+  if (header && header.destination) {    
+    const gatewayIp = this.getGatewayIp(clientId);    
+    if (header.destination === gatewayIp) {    
+      console.log(`[调试] 检测到ping网关（传输协议4），直接响应`);    
+      const response = await this.handleGatewayPing(clientId, uint8Data);  
+        
+      // 关键修复：发送响应包给客户端  
+      if (response) {  
+        const server = this.connections.get(clientId);  
+        if (server && server.readyState === WebSocket.OPEN) {  
+          server.send(response.buffer());  
+          console.log(`[调试] ICMP响应已发送给客户端`);  
+        }  
+      }  
+      return;  
+    }    
+  }    
+}
   
     // 优先检查快速转发  
     if (this.shouldFastForward(uint8Data)) {  
