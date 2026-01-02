@@ -1,34 +1,38 @@
-name = "vnts-ws-relay"  
-main = "src/worker.js"  
-compatibility_date = "2023-10-30"  
+name = "vnts-ws-relay"
+main = "src/worker.js"
+compatibility_date = "2023-10-30"
   
-[vars]  
-# WebSocket 路径配置  
+[vars]
+# 连接后缀：防止别人连接使用输入正确的后缀才能连接 ，用法 -s wss://域名/后缀
 WS_PATH = "ws"  
   
-# VNT 特定配置  
-VNT_DISABLE_RELAY = "0"  
+# 是否禁用中继转发： 0 允许中继  1 仅P2P
+DISABLE_RELAY = "0"
+
+# 心跳检查间隔时间，检查单个客户端已经断开的连接(频率较高)，防止内存泄漏 单位：秒
+HEARTBEAT_INTERVAL = "30" 
+
+# 健康检查间隔时间，检查所有已经断开的连接（频率较低），防止内存泄漏 单位：秒
+HEALTH_CHECK_INTERVAL = "300" 
+
+# 日志等级  
+DEBUG_MODE = "1"
+LOG_LEVEL = "debug"
   
-# 性能设置  
-MAX_CONNECTIONS_PER_ROOM = "100"  
-HEARTBEAT_INTERVAL = "60"  
+[[durable_objects.bindings]]
+# Durable Objects 绑定配置
+name = "RELAY_ROOM"
+class_name = "RelayRoom"
   
-# 调试设置  
-DEBUG_MODE = "1"  
-LOG_LEVEL = "debug"  
+[[migrations]]
+# Durable Objects 的数据库迁移版本
+tag = "v1"
+new_classes = ["RelayRoom"]
   
-[[durable_objects.bindings]]  
-name = "RELAY_ROOM"  
-class_name = "RelayRoom"  
+# 开发环境默认输出 debug 等级日志
+[env.development]
+vars = { DEBUG_MODE = "1", LOG_LEVEL = "debug" }
   
-[[migrations]]  
-tag = "v1"  
-new_classes = ["RelayRoom"]  
-  
-# 开发环境配置  
-[env.development]  
-vars = { DEBUG_MODE = "1", LOG_LEVEL = "debug" }  
-  
-# 生产环境配置    
-[env.production]  
+# 生产环境默认输出 warn 等级日志    
+[env.production]
 vars = { DEBUG_MODE = "0", LOG_LEVEL = "warn" }
