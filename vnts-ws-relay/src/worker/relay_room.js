@@ -181,24 +181,26 @@ export class RelayRoom {
   }
 
   // 快速转发判断
-  shouldFastForward(data) {
-    if (!data || data.length < 12) return false;
-
-    const protocol = data[1];
-    const transport = data[2];
-
-    // 扩大快速路径范围
-    return (
-      // IPTURN 数据包（最常见）
-      (protocol === 4 && transport === 4) ||
-      // WGIpv4 数据包
-      (protocol === 4 && transport === 2) ||
-      // Ipv4Broadcast 数据包
-      (protocol === 4 && transport === 3) ||
-      // 部分 CONTROL 协议包（ping/pong）
-      (protocol === 3 && (transport === 1 || transport === 2))
-    );
-  }
+  shouldFastForward(data) {  
+  if (!data || data.length < 12) return false;  
+  
+  const protocol = data[1];  
+  const transport = data[2];  
+  
+  // 扩大快速路径范围  
+  return (  
+    // IPTURN 数据包（最常见）  
+    (protocol === 4 && transport === 4) ||  
+    // IPTURN IPv4 数据包（包含 ICMP ping）  
+    (protocol === 4 && transport === 1) ||  
+    // WGIpv4 数据包  
+    (protocol === 4 && transport === 2) ||  
+    // Ipv4Broadcast 数据包  
+    (protocol === 4 && transport === 3) ||  
+    // 部分 CONTROL 协议包（ping/pong）  
+    (protocol === 3 && (transport === 1 || transport === 2))  
+  );  
+}
 
   // 需要完整解析的包
   requiresFullParsing(data) {
@@ -264,36 +266,37 @@ export class RelayRoom {
       return;  
     }  
   
-    console.log(`[调试] 收到来自 ${clientId} 的数据`);  
-    console.log(`[调试] 数据长度: ${uint8Data.length}`);  
-  
     // 更新活动时间  
     this.updateLastActivity(clientId);  
   
-    // 快速路径：解析 VNT 头部  
-    const header = parseVNTHeaderFast(uint8Data); // 使用导入的函数  
+    // 优先检查快速转发  
+    if (this.shouldFastForward(uint8Data)) {  
+      const protocol = uint8Data[1];  
+      const transport = uint8Data[2];  
+      console.log(`[调试] 快速转发: 协议=${protocol}, 传输=${transport}`);  
+      return await this.fastForward(clientId, uint8Data);  
+    }  
+  
+    // 其他逻辑保持不变...  
+    const header = parseVNTHeaderFast(uint8Data);  
       
     if (!header) {  
-      // 头部解析失败，走完整解析路径  
-      console.log(`[调试] 头部解析失败，走完整解析路径`);  
       return await this.fullParsingPath(clientId, uint8Data);  
     }  
   
-    // 数据包直接 0 拷贝转发  
-    if (header.isDataPacket) {  
+    // 数据包 0 拷贝转发（排除 ICMP 包）  
+    if (header.isDataPacket && !(uint8Data[1] === 4 && uint8Data[2] === 1)) {  
       const targetIp = header.destination;  
       const targetClient = this.findClientByIp(targetIp);  
         
       if (targetClient && targetClient !== clientId) {  
-        // 0 拷贝：直接发送原始 buffer  
         const server = this.connections.get(targetClient);  
         if (server && server.readyState === WebSocket.OPEN) {  
           server.send(uint8Data);  
-          return; // 转发完成，不需要继续处理  
+          return;  
         }  
       }  
         
-      // 目标客户端不存在或离线，需要中继  
       if (this.env.VNT_DISABLE_RELAY !== "1") {  
         return await this.relayPacket(clientId, uint8Data, header);  
       }  
@@ -301,16 +304,15 @@ export class RelayRoom {
   
     // 控制包和服务包需要完整解析  
     if (header.isControlPacket || header.isServicePacket) {  
-      console.log(`[调试] 检测到控制/服务包，走完整解析路径`);  
       return await this.fullParsingPath(clientId, uint8Data);  
     }  
   
-    // 其他情况默认广播（保持兼容性）  
+    // 其他情况默认广播  
     return await this.fastForward(clientId, uint8Data);  
   } catch (error) {  
     console.error(`[调试] 处理 ${clientId} 消息时出错:`, error);  
   }  
-}  
+}
   
 // 辅助函数：根据 IP 查找客户端  
 findClientByIp(targetIp) {  
