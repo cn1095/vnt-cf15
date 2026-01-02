@@ -1,4 +1,5 @@
 import { ENCRYPTION_RESERVED } from "./constants.js";
+import { logger } from "./logger.js";
 
 /**
  * RSA 加密器
@@ -6,9 +7,13 @@ import { ENCRYPTION_RESERVED } from "./constants.js";
  */
 export class RsaCipher {
   constructor(privateKeyDer, publicKeyDer) {
+    logger.debug(`[RSA加密器-初始化] 创建RSA加密器实例`);
     this.privateKeyDer = privateKeyDer;
     this.publicKeyDer = publicKeyDer;
     this.finger = this.calculateFinger(publicKeyDer);
+    logger.debug(
+      `[RSA加密器-指纹] 公钥指纹计算完成: ${this.finger.substring(0, 16)}...`
+    );
   }
 
   /**
@@ -39,8 +44,10 @@ export class RsaCipher {
    * 基于 vnt_s/vnts/src/cipher/rsa_cipher.rs:116-148 实现
    */
   async decrypt(netPacket) {
+    logger.debug(`[RSA解密-开始] 开始RSA解密操作`);
     try {
       // 导入私钥
+      logger.debug(`[RSA解密-密钥] 导入RSA私钥`);
       const privateKey = await crypto.subtle.importKey(
         "pkcs8",
         this.privateKeyDer,
@@ -50,6 +57,7 @@ export class RsaCipher {
       );
 
       // 解密数据
+      logger.debug(`[RSA解密-处理] 执行RSA-OAEP解密`);
       const decryptedData = await crypto.subtle.decrypt(
         { name: "RSA-OAEP" },
         privateKey,
@@ -57,12 +65,15 @@ export class RsaCipher {
       );
 
       // 创建 RSA 密钥体
+      logger.debug(`[RSA解密-密钥体] 构建RSA密钥体`);
       const secretBody = new RsaSecretBody(new Uint8Array(decryptedData));
 
       // 构建 nonce
       const nonceRaw = this.buildNonceRaw(netPacket);
+      logger.debug(`[RSA解密-验证] 构建nonce，长度: ${nonceRaw.length}字节`);
 
       // 验证指纹
+      logger.debug(`[RSA解密-指纹] 开始验证数据指纹`);
       const hasher = await crypto.subtle.digest(
         "SHA-256",
         new Uint8Array([...secretBody.body(), ...nonceRaw])
@@ -71,11 +82,14 @@ export class RsaCipher {
       const expectedFinger = hashArray.slice(16);
 
       if (!this.arraysEqual(expectedFinger, secretBody.finger())) {
+        logger.error(`[RSA解密-错误] 指纹验证失败，数据可能被篡改`);
         throw new Error("finger err");
       }
+      logger.debug(`[RSA解密-成功] RSA解密完成，数据完整性验证通过`);
 
       return secretBody;
     } catch (error) {
+      logger.error(`[RSA解密-失败] 解密过程异常: ${error.message}`);
       throw new Error(`decrypt failed ${error.message}`);
     }
   }
@@ -85,23 +99,28 @@ export class RsaCipher {
    * 基于 vnt_s/vnt/vnt/src/cipher/rsa_cipher.rs:69-111 实现
    */
   async encrypt(netPacket) {
+    logger.debug(`[RSA加密-开始] 开始RSA加密操作`);
     if (netPacket.reserve() < 256) {
+      logger.error(`[RSA加密-错误] 数据包预留空间不足，需要256字节`);
       // RSA_ENCRYPTION_RESERVED
       throw new Error("too short");
     }
 
     const dataLen = netPacket.data_len() + 256;
     netPacket.set_data_len(dataLen);
+    logger.debug(`[RSA加密-准备] 数据包长度调整为: ${dataLen}字节`);
 
     const nonceRaw = this.buildNonceRaw(netPacket);
     const secretBody = new RsaSecretBody(netPacket.payload_mut());
 
     // 设置随机数
+    logger.debug(`[RSA加密-随机数] 生成64字节随机数`);
     const random = new Uint8Array(64);
     crypto.getRandomValues(random);
     secretBody.set_random(random);
 
     // 计算指纹
+    logger.debug(`[RSA加密-指纹] 计算数据指纹`);
     const hasher = await crypto.subtle.digest(
       "SHA-256",
       new Uint8Array([...secretBody.body(), ...nonceRaw])
@@ -110,6 +129,7 @@ export class RsaCipher {
     secretBody.set_finger(hashArray.slice(16));
 
     // 导入公钥并加密
+    logger.debug(`[RSA加密-密钥] 导入RSA公钥`);
     const publicKey = await crypto.subtle.importKey(
       "spki",
       this.publicKeyDer,
@@ -118,6 +138,7 @@ export class RsaCipher {
       ["encrypt"]
     );
 
+    logger.debug(`[RSA加密-处理] 执行RSA-OAEP加密`);
     const encryptedData = await crypto.subtle.encrypt(
       { name: "RSA-OAEP" },
       publicKey,
@@ -130,6 +151,9 @@ export class RsaCipher {
     );
     newPacket.buffer_mut().set(netPacket.buffer().slice(0, 12), 0);
     newPacket.set_payload(new Uint8Array(encryptedData));
+    logger.debug(
+      `[RSA加密-成功] RSA加密完成，密文长度: ${encryptedData.byteLength}字节`
+    );
 
     return newPacket;
   }
@@ -169,6 +193,8 @@ export class RsaCipher {
  */
 export class AesGcmCipher {
   constructor(key, finger) {
+    const keySize = key.length === 16 ? "128位" : "256位";
+    logger.debug(`[AES-GCM-初始化] 创建${keySize}AES-GCM加密器`);
     this.key = key;
     this.finger = finger;
   }
@@ -198,16 +224,20 @@ export class AesGcmCipher {
    * 基于 vnt_s/vnt/vnt/src/cipher/aes_gcm/aes_gcm_cipher.rs:38-76 实现
    */
   async decrypt_ipv4(netPacket) {
+    logger.debug(`[AES解密-开始] 开始AES-GCM解密`);
     if (!netPacket.is_encrypt()) {
+      logger.warn(`[AES解密-警告] 数据包未标记为加密状态`);
       throw new Error("not encrypt");
     }
 
     if (netPacket.payload().len < 16) {
+      logger.error(`[AES解密-错误] 载荷长度不足，至少需要16字节`);
       // AES_GCM_ENCRYPTION_RESERVED
       throw new Error("data err");
     }
 
     const nonceRaw = netPacket.head_tag();
+    logger.debug(`[AES解密-参数] 获取nonce，长度: ${nonceRaw.length}字节`);
     const secretBody = new SecretBody(
       netPacket.payload_mut(),
       this.finger !== null
@@ -215,17 +245,20 @@ export class AesGcmCipher {
 
     // 验证指纹
     if (this.finger) {
+      logger.debug(`[AES解密-指纹] 开始验证AES-GCM指纹`);
       const finger = this.finger.calculate_finger(
         nonceRaw,
         secretBody.en_body()
       );
       if (!this.arraysEqual(finger, secretBody.finger())) {
+        logger.error(`[AES解密-错误] AES-GCM指纹验证失败`);
         throw new Error("finger err");
       }
     }
 
     try {
       // 导入 AES 密钥
+      logger.debug(`[AES解密-密钥] 导入AES密钥`);
       const aesKey = await crypto.subtle.importKey(
         "raw",
         this.key,
@@ -235,6 +268,7 @@ export class AesGcmCipher {
       );
 
       // 解密数据
+      logger.debug(`[AES解密-处理] 执行AES-GCM解密`);
       const decryptedData = await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
@@ -248,7 +282,11 @@ export class AesGcmCipher {
       netPacket.set_encrypt_flag(false);
       netPacket.set_data_len(netPacket.data_len() - 16);
       netPacket.payload_mut().set(new Uint8Array(decryptedData), 0);
+      logger.debug(
+        `[AES解密-成功] AES-GCM解密完成，明文长度: ${decryptedData.byteLength}字节`
+      );
     } catch (error) {
+      logger.error(`[AES解密-失败] 解密过程异常: ${error.message}`);
       throw new Error(`解密失败: ${error.message}`);
     }
   }
@@ -326,21 +364,34 @@ export class AesGcmCipher {
  */
 export class Finger {
   constructor(token) {
+    logger.debug(
+      `[指纹计算器-初始化] 创建指纹计算器，token长度: ${token.length}`
+    );
     this.token = token;
   }
 
   /**
    * 计算指纹
    */
-  calculate_finger(nonceRaw, data) {
+  async calculate_finger(nonceRaw, data) {
+    logger.debug(`[指纹计算-开始] 开始计算SHA-256指纹`);
+    logger.debug(
+      `[指纹计算-参数] nonce长度: ${nonceRaw.length}字节, data长度: ${data.length}字节`
+    );
+
     const combined = new Uint8Array([
       ...nonceRaw,
       ...data,
       ...new TextEncoder().encode(this.token),
     ]);
-    return crypto.subtle.digest("SHA-256", combined).then((hash) => {
-      return new Uint8Array(hash).slice(0, 16); // 取前 16 字节作为指纹
-    });
+
+    logger.debug(`[指纹计算-处理] 合并数据长度: ${combined.length}字节`);
+
+    const hash = await crypto.subtle.digest("SHA-256", combined);
+    const finger = new Uint8Array(hash).slice(0, 16);
+
+    logger.debug(`[指纹计算-完成] 指纹计算完成，取前16字节`);
+    return finger;
   }
 }
 
@@ -449,25 +500,41 @@ export function randomU64String() {
  * 生成 RSA 密钥对
  */
 export async function generateRsaKeyPair() {
-  const keyPair = await crypto.subtle.generateKey(
-    {
-      name: "RSA-OAEP",
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: "SHA-256",
-    },
-    true,
-    ["encrypt", "decrypt"]
-  );
+  logger.info(`[密钥生成-开始] 开始生成2048位RSA密钥对`);
 
-  const privateKeyDer = await crypto.subtle.exportKey(
-    "pkcs8",
-    keyPair.privateKey
-  );
-  const publicKeyDer = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+  try {
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: "RSA-OAEP",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["encrypt", "decrypt"]
+    );
 
-  return {
-    privateKey: new Uint8Array(privateKeyDer),
-    publicKey: new Uint8Array(publicKeyDer),
-  };
+    logger.debug(`[密钥生成-导出] 导出私钥和公钥`);
+    const privateKeyDer = await crypto.subtle.exportKey(
+      "pkcs8",
+      keyPair.privateKey
+    );
+    const publicKeyDer = await crypto.subtle.exportKey(
+      "spki",
+      keyPair.publicKey
+    );
+
+    const result = {
+      privateKey: new Uint8Array(privateKeyDer),
+      publicKey: new Uint8Array(publicKeyDer),
+    };
+
+    logger.info(
+      `[密钥生成-成功] RSA密钥对生成完成，私钥长度: ${result.privateKey.length}字节，公钥长度: ${result.publicKey.length}字节`
+    );
+    return result;
+  } catch (error) {
+    logger.error(`[密钥生成-失败] 密钥生成异常: ${error.message}`);
+    throw error;
+  }
 }

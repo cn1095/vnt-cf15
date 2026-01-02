@@ -13,7 +13,7 @@ import {
   Ipv4Addr,
 } from "./context.js";
 import { AesGcmCipher, randomU64String } from "./crypto.js";
-import { logger } from "./core/logger.js";
+import { logger } from "./logger.js";
 
 export class PacketHandler {
   constructor(env) {
@@ -22,7 +22,31 @@ export class PacketHandler {
     this.cache.networks = new Map();
     this.cachedEpoch = 0;
     this.lastEpochUpdate = 0;
+    this.rsaCipher = null;
+    // 如果配置了服务端加密，生成RSA密钥对
+    if (env.SERVER_ENCRYPT === "true") {
+      this.initializeRsaCipher();
+    }
   }
+
+  async initializeRsaCipher() {
+    try {
+      logger.info(`[RSA初始化-开始] 生成服务端RSA密钥对`);
+      const keyPair = await generateRsaKeyPair();
+      this.rsaCipher = new RsaCipher(keyPair.privateKey, keyPair.publicKey);
+      logger.info(
+        `[RSA初始化-完成] RSA密钥对生成完成，指纹: ${this.rsaCipher
+          .finger()
+          .substring(0, 16)}...`
+      );
+    } catch (error) {
+      logger.error(
+        `[RSA初始化-失败] RSA密钥对生成失败: ${error.message}`,
+        error
+      );
+    }
+  }
+
   calculateGateway(networkInfo) {
     // 网关是网段的 .1 地址
     return (networkInfo.network & networkInfo.netmask) | 0x01;
@@ -83,7 +107,7 @@ export class PacketHandler {
       }
     }
 
-    // 新增：处理 CONTROL 协议的握手请求
+    // 处理 CONTROL 协议的握手请求
     if (packet.protocol === PROTOCOL.CONTROL) {
       logger.debug(`检测到 CONTROL 协议, 传输类型=${packet.transportProtocol}`);
       if (packet.transportProtocol === TRANSPORT_PROTOCOL.HandshakeRequest) {
@@ -150,7 +174,7 @@ export class PacketHandler {
       }
     }
 
-    // 新增：处理 IpTurn 协议
+    // 处理 IpTurn 协议
     if (packet.protocol === PROTOCOL.IPTURN) {
       return await this.handleIpTurn(
         context,
@@ -165,13 +189,20 @@ export class PacketHandler {
     return await this.handleDataForward(context, packet, addr, tcpSender);
   }
 
-  // 新增：IpTurn 协议处理
+  // IpTurn 协议处理
   async handleIpTurn(context, packet, addr, tcpSender, serverSecret) {
     const destination = packet.destination;
     const source = packet.source;
 
+    logger.debug(
+      `处理IP隧道协议，来源: ${this.formatIp(source)}, 目标: ${this.formatIp(
+        destination
+      )}`
+    );
+
     switch (packet.transportProtocol) {
       case IP_TURN_TRANSPORT_PROTOCOL.Ipv4:
+        logger.debug(`[IpTurn-路由] 路由到IPv4处理器`);
         return await this.handleIpv4Packet(
           context,
           packet,
@@ -183,14 +214,19 @@ export class PacketHandler {
         );
 
       case IP_TURN_TRANSPORT_PROTOCOL.WGIpv4:
+        logger.debug(`[IpTurn-路由] 路由到WireGuard IPv4处理器`);
         // WireGuard 数据包转发
         return await this.handleWgIpv4(context, packet, destination);
 
       case IP_TURN_TRANSPORT_PROTOCOL.Ipv4Broadcast:
+        logger.debug(`[IpTurn-路由] 路由到IPv4广播处理器`);
         // 广播包处理
         return await this.handleIpv4Broadcast(context, packet);
 
       default:
+        logger.warn(
+          `[IpTurn-警告] 未知的传输协议类型: ${packet.transportProtocol}`
+        );
         break;
     }
   }
@@ -207,14 +243,20 @@ export class PacketHandler {
   ) {
     try {
       // 解析 IPv4 包
+      logger.debug(
+        `开始处理IPv4数据包，来源: ${this.formatIp(
+          source
+        )}, 目标: ${this.formatIp(destination)}`
+      );
       const ipv4Data = packet.payload;
       const ipv4Packet = this.parseIpv4Packet(ipv4Data);
 
       if (!ipv4Packet) {
+        logger.warn(`IPv4包解析失败`);
         return null;
       }
-      console.log(
-        `[调试] IPv4包: 协议=${ipv4Packet.protocol}, 目标=${this.formatIp(
+      logger.debug(
+        `协议=${ipv4Packet.protocol}, 目标=${this.formatIp(
           destination
         )}, 网关=${this.formatIp(context.link_context.network_info.gateway)}`
       );
@@ -224,11 +266,11 @@ export class PacketHandler {
         ipv4Packet.protocol === 1 &&
         destination === context.link_context.network_info.gateway
       ) {
-        console.log(`[调试] 检测到ICMP ping包`);
+        logger.info(`检测到发往网关的ICMP ping请求`);
         const icmpPacket = this.parseIcmpPacket(ipv4Packet.payload);
 
         if (icmpPacket && icmpPacket.type === 8) {
-          console.log(`[调试] 创建ICMP Echo Reply`);
+          logger.info(`创建ICMP Echo Reply响应`);
           // 创建 ICMP Echo Reply
           return this.createPingResponse(
             packet,
@@ -241,9 +283,10 @@ export class PacketHandler {
       }
 
       // 对于其他 IP 包，进行转发
+      logger.debug(`转发IPv4数据包到目标: ${this.formatIp(destination)}`);
       return await this.forwardIpPacket(context, packet, destination);
     } catch (error) {
-      console.error("处理 IPv4 包失败:", error);
+      logger.error(`处理IPv4包时发生异常: ${error.message}`, error);
       return null;
     }
   }
@@ -307,23 +350,42 @@ export class PacketHandler {
 
   // 转发 IP 包到目标客户端
   async forwardIpPacket(context, packet, destination) {
+    logger.debug(
+      `[IP转发-开始] 开始转发IP包到目标: ${this.formatIp(destination)}`
+    );
     // 查找目标客户端
     const targetClient = context.link_context.clients.get(
       destination.toString()
     );
 
     if (!targetClient || !targetClient.online) {
-      console.log(`目标客户端 ${destination} 不在线或不存在`);
+      logger.warn(
+        `[IP转发-警告] 目标客户端 ${this.formatIp(destination)} 不在线或不存在`
+      );
       return null;
     }
 
+    logger.debug(
+      `[IP转发-客户端] 找到目标客户端，连接类型: ${
+        targetClient.tcpSender ? "TCP" : "UDP"
+      }`
+    );
     // 转发到目标客户端
     if (targetClient.tcpSender) {
+      logger.debug(`[IP转发-TCP] 通过TCP连接转发数据包`);
       await targetClient.tcpSender.send(packet.buffer);
     } else {
       // UDP 转发
+      logger.debug(
+        `[IP转发-UDP] 通过UDP转发数据包到: ${JSON.stringify(
+          targetClient.address
+        )}`
+      );
       await this.udp.send(packet.buffer, targetClient.address);
     }
+    logger.info(
+      `[IP转发-完成] 数据包已成功转发到 ${this.formatIp(destination)}`
+    );
 
     return null;
   }
@@ -492,59 +554,125 @@ export class PacketHandler {
     }
 
     // 返回错误，表示需要先建立上下文
+    logger.warn(`无效的协议组合，需要先建立上下文`);
     return this.createErrorPacket(addr, packet.source, "No context");
   }
 
   async handleHandshake(packet, addr) {
     try {
-      console.log(`[调试] === 握手开始 ===`);
+      logger.info(`[握手-开始] 开始处理客户端握手请求`);
 
       const payload = packet.payload();
       const handshakeReq = this.parseHandshakeRequest(payload);
 
-      console.log(`[调试] 客户端握手请求:`, handshakeReq);
+      logger.debug(
+        `[握手-请求] 客户端握手请求参数: ${JSON.stringify(handshakeReq)}`
+      );
 
       const response = this.createHandshakeResponse(handshakeReq);
+
+      // 设置加密相关信息
+      if (this.rsaCipher) {
+        logger.debug(`[握手-加密] 启用服务端加密模式`);
+        response.secret = true;
+        response.public_key = this.rsaCipher.publicKey();
+        response.key_finger = this.rsaCipher.finger();
+      } else {
+        logger.debug(`[握手-加密] 未启用服务端加密`);
+      }
 
       // 确保响应使用 SERVICE 协议
       response.set_protocol(PROTOCOL.SERVICE);
       response.set_transport_protocol(TRANSPORT_PROTOCOL.HandshakeResponse);
+      logger.debug(
+        `[握手-协议] 设置响应协议: SERVICE, 传输: HandshakeResponse`
+      );
 
       // 使用默认网关
       const defaultGateway = 0x0a240001; // 10.36.0.1
       this.setCommonParams(response, packet.source, defaultGateway);
+      logger.debug(
+        `[握手-网关] 设置默认网关: ${this.formatIp(defaultGateway)}`
+      );
 
       // 修改最终缓冲区的 TTL
       const finalBuffer = response.buffer();
       const view = new DataView(finalBuffer.buffer || finalBuffer);
       const currentTtl = view.getUint8(3);
-      console.log(
-        `[调试] 发送前 TTL 检查: 0x${currentTtl.toString(16).padStart(2, "0")}`
+      logger.debug(
+        `[握手-TTL] 发送前TTL检查: 0x${currentTtl
+          .toString(16)
+          .padStart(2, "0")}`
       );
 
       // 强制设置 TTL 为 0xff (原始TTL=15, 当前TTL=15)
       view.setUint8(3, 0xff);
-      console.log(`[调试] 强制修复 TTL 为: 0xff`);
+      logger.debug(`[握手-TTL] 强制修复TTL为: 0xff`);
 
-      console.log(
-        `[调试] 握手响应协议: ${response.protocol}, 传输: ${response.transportProtocol}`
+      logger.info(
+        `[握手-完成] 握手响应构建完成，协议: ${response.protocol}, 传输: ${
+          response.transportProtocol
+        }，网关: ${this.formatIp(defaultGateway)}`
       );
-      console.log(`[调试] 握手响应网关: ${this.formatIp(defaultGateway)}`);
-      console.log(`[调试] === 握手结束 ===`);
 
       return response;
     } catch (error) {
-      console.error("[调试] 握手错误:", error);
+      logger.error(`[握手-错误] 握手处理失败: ${error.message}`, error);
       return this.createErrorPacket(addr, packet.source, "握手失败");
     }
   }
 
   async handleSecretHandshake(context, packet, addr) {
-    console.log(`Secret handshake from ${addr}`);
+    logger.info(
+      `[加密握手-开始] 处理来自 ${JSON.stringify(addr)} 的加密握手请求`
+    );
 
-    // 这里应该实现 RSA 解密和 AES 密钥交换
-    // 简化实现，实际需要完整的加密逻辑
     try {
+      // 检查是否有RSA加密器
+      if (!this.rsaCipher) {
+        logger.error(`[加密握手-错误] 服务端未配置RSA加密器`);
+        return this.createErrorPacket(
+          addr,
+          packet.source,
+          "No RSA cipher configured"
+        );
+      }
+
+      logger.debug(`[加密握手-解密] 开始RSA解密握手请求`);
+
+      // RSA解密握手请求
+      const secretBody = await this.rsaCipher.decrypt(packet);
+      logger.debug(`[加密握手-解析] 解析SecretHandshakeRequest`);
+
+      const handshakeReq = this.parseSecretHandshakeRequest(secretBody.data());
+
+      if (!handshakeReq || !handshakeReq.token || !handshakeReq.key) {
+        logger.error(`[加密握手-错误] 握手请求参数无效`);
+        return this.createErrorPacket(
+          addr,
+          packet.source,
+          "Invalid handshake request"
+        );
+      }
+
+      logger.debug(
+        `[加密握手-验证] Token长度: ${handshakeReq.token.length}, Key长度: ${handshakeReq.key.length}`
+      );
+
+      // 创建AES-GCM加密器
+      logger.debug(`[加密握手-AES] 创建AES-256-GCM加密器`);
+      const finger = new Finger(handshakeReq.token);
+      const cipher = new AesGcmCipher(handshakeReq.key, finger);
+
+      // 设置加密会话
+      context.server_cipher = cipher;
+      this.cache.cipher_session.set(addr, cipher);
+      logger.info(
+        `[加密握手-会话] 已为客户端 ${JSON.stringify(addr)} 建立加密会话`
+      );
+
+      // 创建响应包
+      logger.debug(`[加密握手-响应] 创建SecretHandshakeResponse`);
       const response = NetPacket.new_encrypt(ENCRYPTION_RESERVED);
       response.set_protocol(PROTOCOL.SERVICE);
       response.set_transport_protocol(
@@ -552,14 +680,17 @@ export class PacketHandler {
       );
       this.setCommonParams(response, packet.source);
 
-      // 创建加密会话（简化）
-      const cipher = new AesGcmCipher(this.generateRandomKey());
-      context.server_cipher = cipher;
-      this.cache.cipher_session.set(addr, cipher);
+      // 加密响应包
+      logger.debug(`[加密握手-加密] 加密响应包`);
+      cipher.encrypt_ipv4(response);
 
+      logger.info(`[加密握手-完成] 加密握手处理完成`);
       return response;
     } catch (error) {
-      console.error("Secret handshake error:", error);
+      logger.error(
+        `[加密握手-失败] 处理加密握手时发生异常: ${error.message}`,
+        error
+      );
       return this.createErrorPacket(
         addr,
         packet.source,
@@ -568,6 +699,9 @@ export class PacketHandler {
     }
   }
   createDeviceUpdatePacket(networkInfo) {
+    logger.debug(
+      `[客户端更新-开始] 创建客户端列表更新，当前客户端数量: ${networkInfo.clients.size}`
+    );
     const deviceInfoList = Array.from(networkInfo.clients.values())
       .filter((client) => client.virtual_ip !== 0)
       .map((client) => ({
@@ -584,6 +718,7 @@ export class PacketHandler {
       epoch: networkInfo.epoch,
       update_type: "device_list_update",
     };
+    logger.debug(`[客户端更新-数据] 构建响应数据，epoch: ${networkInfo.epoch}`);
 
     const responseBytes = this.encodeRegistrationResponse(responseData);
     const response = NetPacket.new(responseBytes.length);
@@ -591,6 +726,9 @@ export class PacketHandler {
     response.set_protocol(PROTOCOL.SERVICE);
     response.set_transport_protocol(TRANSPORT_PROTOCOL.DeviceListUpdate);
     response.set_payload(responseBytes);
+    logger.debug(
+      `[客户端更新-完成] 设备列表更新包创建完成，包大小: ${responseBytes.length}字节`
+    );
 
     return response;
   }
@@ -603,22 +741,40 @@ export class PacketHandler {
         try {
           await client.tcp_sender.send(updatePacket.buffer().to_vec());
         } catch (error) {
-          console.error(`通知客户端 ${ip} 失败:`, error);
+          logger.error(
+            `[客户端列表更新] 通知客户端 ${this.formatIp(ip)} 失败: ${
+              error.message
+            }`,
+            error
+          );
         }
       }
     }
   }
 
   async handleRegistration(context, packet, addr, tcpSender) {
-    console.log(`[DEBUG] Registration request received`);
+    logger.info(
+      `[注册-开始] 处理客户端注册请求，来源: ${JSON.stringify(addr)}`
+    );
     try {
       const payload = packet.payload();
       const registrationReq = this.parseRegistrationRequest(payload);
+      logger.debug(
+        `[注册-请求] 解析注册请求，设备ID: ${registrationReq.device_id}, 名称: ${registrationReq.name}`
+      );
 
       // 获取客户端请求的IP
       const requestedIp = registrationReq.virtual_ip || 0;
+      logger.debug(
+        `[注册-IP] 客户端请求IP: ${
+          requestedIp !== 0 ? this.formatIp(requestedIp) : "自动分配"
+        }`
+      );
 
       // 创建或获取网络信息
+      logger.debug(
+        `[注册-网络] 创建或获取网络信息，Token: ${registrationReq.token}`
+      );
       const networkInfo = this.getOrCreateNetworkInfo(
         registrationReq.token,
         requestedIp
@@ -629,13 +785,14 @@ export class PacketHandler {
         requestedIp !== 0
           ? requestedIp
           : this.allocateVirtualIp(networkInfo, registrationReq.device_id);
-      console.log(
-        `[DEBUG] Allocated IP: ${this.formatIp(
+      logger.info(
+        `[注册-IP分配] 分配虚拟IP: ${this.formatIp(
           virtualIp
         )}, 网关: ${this.formatIp(networkInfo.gateway)}`
       );
 
       // 创建客户端信息
+      logger.debug(`[注册-客户端] 创建客户端信息对象`);
       const clientInfo = new ClientInfo({
         virtualIp: virtualIp,
         device_id: registrationReq.device_id,
@@ -649,12 +806,16 @@ export class PacketHandler {
       });
 
       // 添加到网络
+      logger.debug(
+        `[注册-网络] 添加客户端到网络，当前网络版本: ${networkInfo.epoch}`
+      );
       networkInfo.epoch += 1;
       networkInfo.clients.set(virtualIp, clientInfo);
       // 保存网络信息引用
       this.currentNetworkInfo = networkInfo;
 
       // 创建链接上下文
+      logger.debug(`[注册-上下文] 创建链接上下文`);
       context.link_context = {
         group: registrationReq.token,
         virtual_ip: virtualIp,
@@ -665,15 +826,16 @@ export class PacketHandler {
       // 创建注册响应
       const response = this.createRegistrationResponse(virtualIp, networkInfo);
       // 通知其他客户端有新设备加入
+      logger.debug(`[注册-通知] 通知其他客户端新设备加入`);
       await this.notifyClientsUpdate(networkInfo, virtualIp);
-      console.log(
-        `[DEBUG] Sending registration response: IP=${this.formatIp(
+      logger.info(
+        `[注册-完成] 注册成功，IP: ${this.formatIp(
           virtualIp
-        )}, Gateway=${this.formatIp(networkInfo.gateway)}`
+        )}, 网关: ${this.formatIp(networkInfo.gateway)}`
       );
       return response;
     } catch (error) {
-      console.error("Registration error:", error);
+      logger.error(`[注册-错误] 注册处理失败: ${error.message}`, error);
       return this.createErrorPacket(addr, packet.source, "Registration failed");
     }
   }
@@ -740,19 +902,26 @@ export class PacketHandler {
   }
 
   async handleDataForward(context, packet, addr, tcpSender) {
+    logger.debug(
+      `[数据转发-开始] 开始处理数据转发，来源: ${JSON.stringify(addr)}`
+    );
     // 增加 TTL
     if (packet.incr_ttl() > 1) {
+      logger.debug(`[数据转发-TTL] TTL递增，新值: ${newTtl}`);
       // 检查是否禁用中继
-      if (this.env.VNT_DISABLE_RELAY === "1") {
-        console.log("Relay disabled, dropping packet");
+      if (this.env.DISABLE_RELAY === "1") {
+        logger.warn(`[数据转发-禁用] 中继转发功能已禁用，丢弃数据包`);
         return null;
       }
 
       const destination = packet.destination;
+      logger.debug(`[数据转发-路由] 目标地址: ${this.formatIp(destination)}`);
 
       if (this.isBroadcast(destination)) {
+        logger.debug(`[数据转发-广播] 检测到广播包，开始广播转发`);
         return await this.broadcastPacket(context.link_context, packet);
       } else {
+        logger.debug(`[数据转发-单播] 检测到单播包，转发到指定目标`);
         return await this.forwardToDestination(
           context.link_context,
           packet,
@@ -767,16 +936,23 @@ export class PacketHandler {
     if (!context.link_context) {
       // 处理服务协议
       if (packet.protocol === PROTOCOL.SERVICE) {
+        logger.debug(`[客户端包-SERVICE] 检测到SERVICE协议`);
         switch (packet.transportProtocol) {
           case TRANSPORT_PROTOCOL.HandshakeRequest:
+            logger.info(`[客户端包-握手] 处理握手请求`);
             return await this.handleHandshake(packet, addr);
           case TRANSPORT_PROTOCOL.RegistrationRequest:
+            logger.info(`[客户端包-注册] 处理注册请求`);
             return await this.handleRegistration(context, packet, addr, null);
           default:
+            logger.debug(
+              `[客户端包-SERVICE] 跳过未知的传输协议: ${packet.transportProtocol}`
+            );
             break;
         }
       }
       // 移除默认握手响应，改为错误响应
+      logger.warn(`[客户端包-错误] 无效的数据包序列，需要先建立上下文`);
       return this.createErrorPacket(
         addr,
         packet.source,
@@ -789,34 +965,58 @@ export class PacketHandler {
 
   async forwardPacket(linkContext, packet) {
     const destination = packet.destination;
+    logger.debug(
+      `[数据包转发-开始] 开始转发数据包，目标: ${this.formatIp(destination)}`
+    );
 
     if (this.isBroadcast(destination)) {
+      logger.debug(`[数据包转发-广播] 检测到广播包，执行广播转发`);
       return await this.broadcastPacket(linkContext, packet);
     } else {
+      logger.debug(`[数据包转发-单播] 检测到单播包，查找目标客户端`);
       const targetClient = linkContext.network_info.clients.get(destination);
       if (targetClient && targetClient.online && targetClient.tcp_sender) {
         // 发送到特定客户端
+        logger.debug(`[数据包转发-发送] 找到目标客户端，开始发送数据包`);
         try {
           await targetClient.tcp_sender.send(packet.buffer().to_vec());
+          logger.debug(
+            `[数据包转发-成功] 数据包已成功发送到 ${this.formatIp(destination)}`
+          );
         } catch (error) {
-          console.error("Forward failed:", error);
+          logger.error(
+            `[数据包转发-失败] 发送到 ${this.formatIp(destination)} 失败: ${
+              error.message
+            }`,
+            error
+          );
           targetClient.online = false;
         }
       }
     }
+    logger.debug(`[数据包转发-完成] 数据包转发处理完成`);
     return null;
   }
 
   async broadcastPacket(linkContext, packet) {
     const networkInfo = linkContext.network_info;
     const sender = packet.source;
+    // logger.info(`[广播包-开始] 开始广播数据包，发送者: ${this.formatIp(sender)}`);
 
     for (const [virtualIp, client] of networkInfo.clients) {
       if (client.virtual_ip !== sender && client.online && client.tcp_sender) {
         try {
+          logger.debug(
+            `[广播包-发送] 向客户端 ${this.formatIp(virtualIp)} 发送广播包`
+          );
           await client.tcp_sender.send(packet.buffer().to_vec());
         } catch (error) {
-          console.error(`Broadcast to ${virtualIp} failed:`, error);
+          logger.error(
+            `[广播包-失败] 广播到 ${this.formatIp(virtualIp)} 失败: ${
+              error.message
+            }`,
+            error
+          );
           client.online = false;
         }
       }
@@ -825,12 +1025,20 @@ export class PacketHandler {
   }
 
   async forwardToDestination(linkContext, packet, destination) {
+    logger.debug(
+      `[目标转发-开始] 开始转发到指定目标: ${this.formatIp(destination)}`
+    );
     const targetClient = linkContext.network_info.clients.get(destination);
     if (targetClient && targetClient.online && targetClient.tcp_sender) {
       try {
         await targetClient.tcp_sender.send(packet.buffer().to_vec());
       } catch (error) {
-        console.error(`Forward to ${destination} failed:`, error);
+        logger.error(
+          `[目标转发-失败] 转发到 ${this.formatIp(destination)} 失败: ${
+            error.message
+          }`,
+          error
+        );
         targetClient.online = false;
       }
     }
@@ -843,6 +1051,7 @@ export class PacketHandler {
 
   // 辅助方法
   setCommonParams(packet, source, gateway) {
+    logger.debug(`[参数设置-开始] 设置数据包公共参数`);
     packet.set_default_version();
     packet.set_destination(source);
     packet.set_source(0x0a240001);
