@@ -1,87 +1,35 @@
 import { ENCRYPTION_RESERVED } from "./constants.js";
-import { RsaWasm } from "./rsa_wasm.js";
-import initWasm from "./rsa_wasm.js";
 import { logger } from "./logger.js";
-
-
-// WASM 初始化 promise  
-let wasmInitialized = false;  
-const wasmInitPromise = (async () => {  
-  try {  
-    // 检测 Cloudflare Workers 环境  
-    const isCloudflareWorkers = typeof globalThis !== 'undefined' &&   
-      (globalThis.Request || globalThis.WebSocket);  
-      
-    if (isCloudflareWorkers) {  
-      // Cloudflare Workers 环境使用字符串路径  
-      await initWasm({ module_or_path: './rsa_wasm_bg.wasm' });  
-    } else {  
-      // 标准环境使用 URL 对象  
-      await initWasm();  
-    }  
-      
-    wasmInitialized = true;  
-    logger.debug(`[WASM-初始化] WebAssembly模块加载成功`);  
-  } catch (error) {  
-    logger.error(`[WASM-初始化] WebAssembly模块加载失败: ${error.message}`);  
-    throw error;  
-  }  
-})();
 
 /**
  * RSA 加密器
  * 基于 vnt_s/vnts/src/cipher/rsa_cipher.rs 实现
  */
 export class RsaCipher {
-  constructor(privateKeyDer, publicKeyDer) {  
-    logger.debug(`[RSA加密器-初始化] 创建RSA加密器实例`);  
-    this.privateKeyDer = privateKeyDer;  
-    this.publicKeyDer = publicKeyDer;  
-    this.fingerValue = null;  
-    this.rsaWasm = new RsaWasm();  
-    this.initFinger(publicKeyDer);  
-    this.initRsaWasm();  
-  }  
-  
-   async initRsaWasm() {  
-    try {  
-      // 等待 WASM 初始化完成  
-      await wasmInitPromise;  
-        
-      // 创建 RsaWasm 实例  
-      this.rsaWasm = new RsaWasm();  
-      this.rsaWasm.set_private_key(this.privateKeyDer);  
-      this.rsaWasm.set_public_key(this.publicKeyDer);  
-      logger.debug(`[RSA-WASM] WebAssembly RSA加密解密器初始化成功`);  
-    } catch (error) {  
-      logger.error(`[RSA-WASM] WebAssembly初始化失败: ${error.message}`);  
-      throw error;  
-    }  
-  }  
-  
-  async initFinger(publicKeyDer) {  
-    this.fingerValue = await this.calculateFinger(publicKeyDer);  
-    logger.debug(  
-      `[RSA加密器-指纹] 公钥指纹计算完成: ${this.fingerValue.substring(0, 16)}...`  
-    );  
+  constructor(privateKeyDer, publicKeyDer) {
+    logger.debug(`[RSA加密器-初始化] 创建RSA加密器实例`);
+    this.privateKeyDer = privateKeyDer;
+    this.publicKeyDer = publicKeyDer;
+    this.finger = this.calculateFinger(publicKeyDer);
+    logger.debug(
+      `[RSA加密器-指纹] 公钥指纹计算完成: ${this.finger.substring(0, 16)}...`
+    );
   }
 
   /**
    * 计算公钥指纹
    */
-  async calculateFinger(publicKeyDer) {  
-    const hashBuffer = await crypto.subtle.digest("SHA-256", publicKeyDer);  
-    return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));  
+  calculateFinger(publicKeyDer) {
+    // 使用 SHA256 计算指纹并返回 base64
+    const hashBuffer = crypto.subtle.digest("SHA-256", publicKeyDer);
+    return btoa(String.fromCharCode(...new Uint8Array(hashBuffer)));
   }
 
   /**
    * 获取指纹
    */
-  async finger() {  
-    if (this.fingerValue === null) {  
-      await this.fingerPromise;  
-    }  
-    return this.fingerValue;  
+  finger() {
+    return this.finger;
   }
 
   /**
@@ -95,97 +43,120 @@ export class RsaCipher {
    * RSA 解密
    * 基于 vnt_s/vnts/src/cipher/rsa_cipher.rs:116-148 实现
    */
-  async decrypt(netPacket) {  
-    logger.debug(`[RSA解密-开始] 开始RSA解密操作`);  
-    try {  
-      const payload = netPacket.payload();  
-      logger.debug(`[RSA解密-数据] 载荷长度: ${payload.length}字节`);  
-  
-      // 使用 WebAssembly 进行 PKCS1v15 解密  
-      logger.debug(`[RSA解密-WASM] 使用WebAssembly进行PKCS1v15解密`);  
-      const decryptedData = this.rsaWasm.decrypt_pkcs1v15(payload);  
-  
-      // 创建 RSA 密钥体  
-      logger.debug(`[RSA解密-密钥体] 构建RSA密钥体`);  
-      const secretBody = new RsaSecretBody(new Uint8Array(decryptedData));  
-  
-      // 构建 nonce  
-      const nonceRaw = this.buildNonceRaw(netPacket);  
-      logger.debug(`[RSA解密-验证] 构建nonce，长度: ${nonceRaw.length}字节`);  
-  
-      // 验证指纹  
-      logger.debug(`[RSA解密-指纹] 开始验证数据指纹`);  
-      const hasher = await crypto.subtle.digest(  
-        "SHA-256",  
-        new Uint8Array([...secretBody.body(), ...nonceRaw])  
-      );  
-      const hashArray = new Uint8Array(hasher);  
-      const expectedFinger = hashArray.slice(16);  
-  
-      if (!this.arraysEqual(expectedFinger, secretBody.finger())) {  
-        logger.error(`[RSA解密-错误] 指纹验证失败，数据可能被篡改`);  
-        throw new Error("finger err");  
-      }  
-        
-      logger.debug(`[RSA解密-成功] RSA解密完成，数据完整性验证通过`);  
-      return secretBody;  
-    } catch (error) {  
-      logger.error(`[RSA解密-失败] 解密过程异常: ${error.message}`);  
-      throw new Error(`decrypt failed ${error.message}`);  
-    }  
-  }  
+  async decrypt(netPacket) {
+    logger.debug(`[RSA解密-开始] 开始RSA解密操作`);
+    try {
+      // 导入私钥
+      logger.debug(`[RSA解密-密钥] 导入RSA私钥`);
+      const privateKey = await crypto.subtle.importKey(
+        "pkcs8",
+        this.privateKeyDer,
+        { name: "RSA-OAEP", hash: "SHA-256" },
+        false,
+        ["decrypt"]
+      );
 
+      // 解密数据
+      logger.debug(`[RSA解密-处理] 执行RSA-OAEP解密`);
+      const decryptedData = await crypto.subtle.decrypt(
+        { name: "RSA-OAEP" },
+        privateKey,
+        netPacket.payload()
+      );
+
+      // 创建 RSA 密钥体
+      logger.debug(`[RSA解密-密钥体] 构建RSA密钥体`);
+      const secretBody = new RsaSecretBody(new Uint8Array(decryptedData));
+
+      // 构建 nonce
+      const nonceRaw = this.buildNonceRaw(netPacket);
+      logger.debug(`[RSA解密-验证] 构建nonce，长度: ${nonceRaw.length}字节`);
+
+      // 验证指纹
+      logger.debug(`[RSA解密-指纹] 开始验证数据指纹`);
+      const hasher = await crypto.subtle.digest(
+        "SHA-256",
+        new Uint8Array([...secretBody.body(), ...nonceRaw])
+      );
+      const hashArray = new Uint8Array(hasher);
+      const expectedFinger = hashArray.slice(16);
+
+      if (!this.arraysEqual(expectedFinger, secretBody.finger())) {
+        logger.error(`[RSA解密-错误] 指纹验证失败，数据可能被篡改`);
+        throw new Error("finger err");
+      }
+      logger.debug(`[RSA解密-成功] RSA解密完成，数据完整性验证通过`);
+
+      return secretBody;
+    } catch (error) {
+      logger.error(`[RSA解密-失败] 解密过程异常: ${error.message}`);
+      throw new Error(`decrypt failed ${error.message}`);
+    }
+  }
 
   /**
    * RSA 加密
    * 基于 vnt_s/vnt/vnt/src/cipher/rsa_cipher.rs:69-111 实现
    */
-  async encrypt(netPacket) {  
-  logger.debug(`[RSA加密-开始] 开始RSA加密操作`);  
-  if (netPacket.reserve() < 256) {  
-    logger.error(`[RSA加密-错误] 数据包预留空间不足，需要256字节`);  
-    // RSA_ENCRYPTION_RESERVED  
-    throw new Error("too short");  
-  }  
-  
-  const dataLen = netPacket.data_len() + 256;  
-  netPacket.set_data_len(dataLen);  
-  logger.debug(`[RSA加密-准备] 数据包长度调整为: ${dataLen}字节`);  
-  
-  const nonceRaw = this.buildNonceRaw(netPacket);  
-  const secretBody = new RsaSecretBody(netPacket.payload_mut());  
-  
-  // 设置随机数  
-  logger.debug(`[RSA加密-随机数] 生成64字节随机数`);  
-  const random = new Uint8Array(64);  
-  crypto.getRandomValues(random);  
-  secretBody.set_random(random);  
-  
-  // 计算指纹  
-  logger.debug(`[RSA加密-指纹] 计算数据指纹`);  
-  const hasher = await crypto.subtle.digest(  
-    "SHA-256",  
-    new Uint8Array([...secretBody.body(), ...nonceRaw])  
-  );  
-  const hashArray = new Uint8Array(hasher);  
-  secretBody.set_finger(hashArray.slice(16));  
-  
-  // 使用 WASM 进行 PKCS1v15 加密  
-  logger.debug(`[RSA加密-WASM] 使用WebAssembly进行PKCS1v15加密`);  
-  const encryptedData = this.rsaWasm.encrypt_pkcs1v15(secretBody.buffer());  
-  
-  // 创建新的数据包  
-  const newPacket = NetPacket.new(  
-    new Uint8Array(12 + encryptedData.length)  
-  );  
-  newPacket.buffer_mut().set(netPacket.buffer().slice(0, 12), 0);  
-  newPacket.set_payload(new Uint8Array(encryptedData));  
-  logger.debug(  
-    `[RSA加密-成功] RSA加密完成，密文长度: ${encryptedData.length}字节`  
-  );  
-  
-  return newPacket;  
-}
+  async encrypt(netPacket) {
+    logger.debug(`[RSA加密-开始] 开始RSA加密操作`);
+    if (netPacket.reserve() < 256) {
+      logger.error(`[RSA加密-错误] 数据包预留空间不足，需要256字节`);
+      // RSA_ENCRYPTION_RESERVED
+      throw new Error("too short");
+    }
+
+    const dataLen = netPacket.data_len() + 256;
+    netPacket.set_data_len(dataLen);
+    logger.debug(`[RSA加密-准备] 数据包长度调整为: ${dataLen}字节`);
+
+    const nonceRaw = this.buildNonceRaw(netPacket);
+    const secretBody = new RsaSecretBody(netPacket.payload_mut());
+
+    // 设置随机数
+    logger.debug(`[RSA加密-随机数] 生成64字节随机数`);
+    const random = new Uint8Array(64);
+    crypto.getRandomValues(random);
+    secretBody.set_random(random);
+
+    // 计算指纹
+    logger.debug(`[RSA加密-指纹] 计算数据指纹`);
+    const hasher = await crypto.subtle.digest(
+      "SHA-256",
+      new Uint8Array([...secretBody.body(), ...nonceRaw])
+    );
+    const hashArray = new Uint8Array(hasher);
+    secretBody.set_finger(hashArray.slice(16));
+
+    // 导入公钥并加密
+    logger.debug(`[RSA加密-密钥] 导入RSA公钥`);
+    const publicKey = await crypto.subtle.importKey(
+      "spki",
+      this.publicKeyDer,
+      { name: "RSA-OAEP", hash: "SHA-256" },
+      false,
+      ["encrypt"]
+    );
+
+    logger.debug(`[RSA加密-处理] 执行RSA-OAEP加密`);
+    const encryptedData = await crypto.subtle.encrypt(
+      { name: "RSA-OAEP" },
+      publicKey,
+      secretBody.buffer()
+    );
+
+    // 创建新的数据包
+    const newPacket = NetPacket.new(
+      new Uint8Array(12 + encryptedData.byteLength)
+    );
+    newPacket.buffer_mut().set(netPacket.buffer().slice(0, 12), 0);
+    newPacket.set_payload(new Uint8Array(encryptedData));
+    logger.debug(
+      `[RSA加密-成功] RSA加密完成，密文长度: ${encryptedData.byteLength}字节`
+    );
+
+    return newPacket;
+  }
 
   buildNonceRaw(netPacket) {
     const nonceRaw = new Uint8Array(12);

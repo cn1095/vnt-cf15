@@ -24,14 +24,27 @@ export class PacketHandler {
     this.lastEpochUpdate = 0;
     this.rsaCipher = null;
     // 如果配置了服务端加密，生成RSA密钥对
-    // if (env.SERVER_ENCRYPT === "true") {
-    //  this.initializeRsaCipher();
-    // }
+    if (env.SERVER_ENCRYPT === "true") {
+      this.initializeRsaCipher();
+    }
   }
 
- // 设置RSA密钥（由RelayRoom调用）  
-  setRsaCipher(rsaCipher) {  
-    this.rsaCipher = rsaCipher;  
+  async initializeRsaCipher() {
+    try {
+      logger.info(`[RSA初始化-开始] 生成服务端RSA密钥对`);
+      const keyPair = await generateRsaKeyPair();
+      this.rsaCipher = new RsaCipher(keyPair.privateKey, keyPair.publicKey);
+      logger.info(
+        `[RSA初始化-完成] RSA密钥对生成完成，指纹: ${this.rsaCipher
+          .finger()
+          .substring(0, 16)}...`
+      );
+    } catch (error) {
+      logger.error(
+        `[RSA初始化-失败] RSA密钥对生成失败: ${error.message}`,
+        error
+      );
+    }
   }
 
   calculateGateway(networkInfo) {
@@ -555,26 +568,18 @@ export class PacketHandler {
       logger.debug(
         `[握手-请求] 客户端握手请求参数: ${JSON.stringify(handshakeReq)}`
       );
-      
-      // 先创建基础响应数据  
-    const responseData = {  
-      version: handshakeReq.version || "Unknown",  
-      secret: false,  
-      public_key: new Uint8Array(0),  
-      key_finger: "",  
-    };  
-  
-    // 如果有RSA加密器，设置加密相关信息  
-    if (this.rsaCipher) {  
-      logger.debug(`[握手-加密] 启用服务端加密模式`);  
-      responseData.secret = true;  
-      responseData.public_key = this.rsaCipher.publicKey();  
-      responseData.key_finger = await this.rsaCipher.finger();  
-    } else {  
-      logger.debug(`[握手-加密] 未启用服务端加密`);  
-    }
 
-      const response = this.createHandshakeResponse(responseData);
+      const response = this.createHandshakeResponse(handshakeReq);
+
+      // 设置加密相关信息
+      if (this.rsaCipher) {
+        logger.debug(`[握手-加密] 启用服务端加密模式`);
+        response.secret = true;
+        response.public_key = this.rsaCipher.publicKey();
+        response.key_finger = this.rsaCipher.finger();
+      } else {
+        logger.debug(`[握手-加密] 未启用服务端加密`);
+      }
 
       // 确保响应使用 SERVICE 协议
       response.set_protocol(PROTOCOL.SERVICE);
@@ -1124,10 +1129,18 @@ export class PacketHandler {
     }
   }
 
-  createHandshakeResponse(responseData) {
+  createHandshakeResponse(request) {
     logger.debug(`[握手响应-开始] 开始创建握手响应`);
-    const clientVersion = responseData.version || "Unknown";
-    logger.info(`[握手响应-版本] 客户端版本: ${clientVersion}`);
+    const clientVersion = request.version || "Unknown";
+    logger.debug(`[握手响应-版本] 客户端版本: ${clientVersion}`);
+
+    const responseData = {
+      version: clientVersion,
+      secret: false,
+      public_key: new Uint8Array(0),
+      key_finger: "",
+    };
+    logger.debug(`[握手响应-数据] 构建响应数据`);
 
     const responseBytes = this.encodeHandshakeResponse(responseData);
 
@@ -1238,7 +1251,7 @@ export class PacketHandler {
   }
 
   parseRegistrationRequest(payload) {
-    logger.info(
+    logger.debug(
       `[协议解析-注册] 开始解析注册请求，载荷长度: ${payload.length}`
     );
     const { parseRegistrationRequest } = require("./protos.js");
