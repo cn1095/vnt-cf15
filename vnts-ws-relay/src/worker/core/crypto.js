@@ -368,14 +368,8 @@ export class Finger {
       `[指纹计算器-初始化] 创建指纹计算器，token长度: ${token.length}`
     );
     this.token = token;
-    this.hash = this.calculateHash();
   }
 
-calculateHash() {  
-    const encoder = new TextEncoder();  
-    const data = encoder.encode(this.token);  
-    return crypto.subtle.digest('SHA-256', data);  
-  }
   /**
    * 计算指纹
    */
@@ -399,49 +393,6 @@ calculateHash() {
     logger.debug(`[指纹计算-完成] 指纹计算完成，取前16字节`);
     return finger;
   }
-}
-
-/**  
- * 密码派生函数  
- * 从密码和token生成密钥  
- */  
-export async function deriveKeyFromPassword(password, token, keyLength = 32) {  
-  const encoder = new TextEncoder();  
-  const passwordData = encoder.encode(password);  
-  const tokenData = encoder.encode(token);  
-    
-  const key = await crypto.subtle.importKey(  
-    'raw',  
-    passwordData,  
-    'PBKDF2',  
-    false,  
-    ['deriveBits', 'deriveKey']  
-  );  
-    
-  const derivedBits = await crypto.subtle.deriveBits(  
-    {  
-      name: 'PBKDF2',  
-      salt: tokenData,  
-      iterations: 100000,  
-      hash: 'SHA-256'  
-    },  
-    key,  
-    keyLength * 8  
-  );  
-    
-  return new Uint8Array(derivedBits);  
-}  
-  
-/**  
- * 生成密钥hash  
- */  
-export async function generateCipherHash(cipherModel, password, token) {  
-  const data = `${cipherModel}:${password}:${token}`;  
-  const encoder = new TextEncoder();  
-  const dataBuffer = encoder.encode(data);  
-    
-  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);  
-  return new Uint8Array(hashBuffer);  
 }
 
 /**

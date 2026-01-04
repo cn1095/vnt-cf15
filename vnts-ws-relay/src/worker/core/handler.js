@@ -12,36 +12,7 @@ import {
   ClientInfo,
   Ipv4Addr,
 } from "./context.js";
-import {   
-  Finger,   
-  AesGcmCipher,  
-  deriveKeyFromPassword,  
-  generateCipherHash   
-} from "./crypto.js";  
-import {  
-  encodeRegistrationRequest,  
-  decodeRegistrationRequest,  
-  encodeRegistrationResponse,  
-  decodeRegistrationResponse,  
-  encodeHandshakeRequest,  
-  decodeHandshakeRequest,  
-  encodeHandshakeResponse,  
-  decodeHandshakeResponse,  
-  encodeSecretHandshakeRequest,  
-  decodeSecretHandshakeRequest,  
-  // 移除不存在的函数  
-  // encodeSecretHandshakeResponse,  
-  // decodeSecretHandshakeResponse,  
-  // encodeError,  
-  // decodeError,  
-  // encodeDeviceUpdate,  
-  // decodeDeviceUpdate,  
-  createRegistrationRequest,  
-  createHandshakeRequest,  
-  createHandshakeResponse,  
-  createSecretHandshakeRequest,  
-  createErrorPacket  // 这个在 protos.js 中定义  
-} from "./protos.js";
+import { AesGcmCipher, randomU64String } from "./crypto.js";
 import { logger } from "./logger.js";
 
 export class PacketHandler {
@@ -762,48 +733,6 @@ export class PacketHandler {
 
       // 更新网段信息（如果是第一个客户端且指定了IP）
       this.updateNetworkSegment(networkInfo, requestedIp, networkInfo.netmask);
-      
-      // 处理客户端密钥生成  
-    let clientSecretHash = registrationReq.client_secret_hash || new Uint8Array(0);  
-    if (registrationReq.client_secret) {  
-      // 检查是否已有密钥策略  
-      if (!networkInfo.cipher_policy) {  
-        // 第一个客户端，创建密钥策略  
-        networkInfo.cipher_policy = {  
-          password: registrationReq.password || "",  
-          cipher_model: registrationReq.cipher_model || "aes_gcm",  
-          token: registrationReq.token  
-        };  
-        logger.info(`[注册-密钥策略] 创建新的密钥策略: model=${networkInfo.cipher_policy.cipher_model}`);  
-      } else {  
-        // 验证客户端使用的密码和model是否匹配  
-        if (networkInfo.cipher_policy.password !== (registrationReq.password || "")) {  
-          throw new Error("密码不匹配，无法加入网络");  
-        }  
-        if (networkInfo.cipher_policy.cipher_model !== (registrationReq.cipher_model || "aes_gcm")) {  
-          throw new Error("加密模型不匹配，请使用相同的--model参数");  
-        }  
-      }  
-  
-      // 生成统一的客户端密钥  
-      const clientCipher = await this.generateClientCipher(  
-        networkInfo.cipher_policy.cipher_model,  
-        networkInfo.cipher_policy.password,  
-        networkInfo.cipher_policy.token  
-      );  
-      clientSecretHash = clientCipher.hash;  
-        
-      logger.info(`[注册-密钥生成] 为客户端生成统一密钥，hash长度: ${clientSecretHash.length}`);  
-    }  
-  
-    // 检查密钥兼容性  
-    for (const [ip, client] of networkInfo.clients) {  
-      if (client.client_secret &&   
-          !this.arraysEqual(client.client_secret_hash, clientSecretHash)) {  
-        logger.warn(`[注册-密钥冲突] 客户端 ${client.name} 与新客户端 ${registrationReq.name} 密钥不匹配`);  
-        throw new Error("网络中存在密钥不兼容的客户端，请检查密码和加密模型设置");  
-      }  
-    }
 
       let virtualIp = requestedIp;
 
@@ -839,8 +768,9 @@ export class PacketHandler {
         version: registrationReq.version,
         online: true,
         address: addr,
-        client_secret: registrationReq.client_secret || false,
-        client_secret_hash: clientSecretHash,
+        client_secret: registrationReq.client_secret || false, // 添加这行
+        client_secret_hash:
+          registrationReq.client_secret_hash || new Uint8Array(0),
         tcp_sender: tcpSender,
         timestamp: Date.now(),
       });
@@ -879,91 +809,6 @@ export class PacketHandler {
     }
   }
 
-// 添加密钥生成函数  
-async generateClientCipher(cipherModel, password, token) {  
-  logger.info(`[密钥生成-开始] 生成客户端密钥: model=${cipherModel}, token=${token}`);  
-    
-  try {  
-    // 创建Finger对象（需要先实现）  
-    const finger = new Finger(token);  
-      
-    // 根据模型创建密钥  
-    let cipher;  
-    switch (cipherModel) {  
-      case "aes_gcm":  
-        // 使用密码生成32字节密钥  
-        const keyMaterial = await this.deriveKeyFromPassword(password, token, 32);  
-        cipher = new AesGcmCipher(keyMaterial, finger);  
-        break;  
-      case "aes_cbc":  
-        // 如果需要支持AES-CBC，在这里添加  
-        throw new Error("AES-CBC暂未实现");  
-      default:  
-        throw new Error(`不支持的加密模型: ${cipherModel}`);  
-    }  
-      
-    // 生成密钥hash  
-    const hash = await this.generateCipherHash(cipherModel, password, token);  
-      
-    logger.info(`[密钥生成-成功] 密钥生成完成，hash长度: ${hash.length}`);  
-      
-    return {  
-      cipher: cipher,  
-      hash: hash  
-    };  
-  } catch (error) {  
-    logger.error(`[密钥生成-失败] 密钥生成失败: ${error.message}`, error);  
-    throw error;  
-  }  
-}  
-  
-// 从密码派生密钥  
-async deriveKeyFromPassword(password, token, keyLength) {  
-  // 使用PBKDF2从密码派生密钥  
-  const encoder = new TextEncoder();  
-  const passwordData = encoder.encode(password);  
-  const tokenData = encoder.encode(token);  
-    
-  const key = await crypto.subtle.importKey(  
-    'raw',  
-    passwordData,  
-    'PBKDF2',  
-    false,  
-    ['deriveBits', 'deriveKey']  
-  );  
-    
-  const derivedBits = await crypto.subtle.deriveBits(  
-    {  
-      name: 'PBKDF2',  
-      salt: tokenData,  
-      iterations: 100000,  
-      hash: 'SHA-256'  
-    },  
-    key,  
-    keyLength * 8  
-  );  
-    
-  return new Uint8Array(derivedBits);  
-}  
-  
-// 生成密钥hash  
-async generateCipherHash(cipherModel, password, token) {  
-  const data = `${cipherModel}:${password}:${token}`;  
-  const encoder = new TextEncoder();  
-  const dataBuffer = encoder.encode(data);  
-    
-  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);  
-  return new Uint8Array(hashBuffer);  
-}  
-  
-// 数组比较工具函数  
-arraysEqual(a, b) {  
-  if (a.length !== b.length) return false;  
-  for (let i = 0; i < a.length; i++) {  
-    if (a[i] !== b[i]) return false;  
-  }  
-  return true;  
-}
   getCachedEpoch() {
     if (!this.cachedEpoch || Date.now() - this.lastEpochUpdate > 5000) {
       this.cachedEpoch = this.getCurrentEpoch();
@@ -1245,24 +1090,14 @@ arraysEqual(a, b) {
       `[注册响应-开始] 创建注册响应包，客户端IP: ${this.formatIp(virtualIp)}`
     );
     // logger.debug(`[注册响应-网络] 当前网络客户端数量: ${networkInfo.clients.size}`);
-    
-    // 为网关生成密钥  
-  let gatewaySecretHash = new Uint8Array(0);  
-  if (networkInfo.cipher_policy) {  
-    gatewaySecretHash = this.generateServerCipher(  
-      networkInfo.cipher_policy.cipher_model,  
-      networkInfo.cipher_policy.password,  
-      networkInfo.cipher_policy.token  
-    );  
-  }
 
     // 明确添加网关信息
     const gatewayInfo = {
       name: "服务器",
       virtual_ip: networkInfo.gateway,
       device_status: 0, // 网关始终在线
-      client_secret: networkInfo.cipher_policy ? true : false,
-      client_secret_hash: gatewaySecretHash,
+      client_secret: false,
+      client_secret_hash: new Uint8Array(0),
       wireguard: false,
     };
     // logger.debug(`[注册响应-网关] 网关信息创建完成，IP: ${this.formatIp(networkInfo.gateway)}`);
@@ -1314,38 +1149,6 @@ arraysEqual(a, b) {
 
     return response;
   }
-  
-  // 生成服务器密钥  
-generateServerCipher(cipherModel, password, token) {  
-  logger.info(`[服务器密钥-生成] 生成服务器密钥: model=${cipherModel}`);  
-    
-  // 服务器使用与客户端相同的密钥生成逻辑  
-  const hash = this.generateCipherHashSync(cipherModel, password, token);  
-  return hash;  
-}  
-  
-// 同步版本的密钥hash生成（用于服务器）  
-generateCipherHashSync(cipherModel, password, token) {  
-  // 简化版本，实际应该与客户端保持一致  
-  const data = `${cipherModel}:${password}:${token}`;  
-  const encoder = new TextEncoder();  
-  const dataBuffer = encoder.encode(data);  
-    
-  // 注意：这里需要同步实现，或者改为异步  
-  // 暂时使用简单的hash  
-  let hash = 0;  
-  for (let i = 0; i < dataBuffer.length; i++) {  
-    const char = dataBuffer[i];  
-    hash = ((hash << 5) - hash) + char;  
-    hash = hash & hash; // Convert to 32bit integer  
-  }  
-    
-  const result = new Uint8Array(32);  
-  const view = new DataView(result.buffer);  
-  view.setUint32(0, hash);  
-    
-  return result;  
-}
 
   // 协议解析方法
   parseHandshakeRequest(payload) {
