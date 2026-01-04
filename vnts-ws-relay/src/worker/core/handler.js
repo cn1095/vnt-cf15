@@ -656,18 +656,27 @@ export class PacketHandler {
       );
     }
   }
-  createDeviceUpdatePacket(networkInfo) {
+  createDeviceUpdatePacket(networkInfo, newClientInfo) {
     // logger.debug(`[客户端更新-开始] 创建客户端列表更新，当前客户端数量: ${networkInfo.clients.size}`);
-    const deviceInfoList = Array.from(networkInfo.clients.values())
-      .filter((client) => client.virtual_ip !== 0)
-      .map((client) => ({
-        name: client.name,
-        virtual_ip: client.virtual_ip,
-        device_status: client.online ? 0 : 1,
-        client_secret: client.client_secret, // 保留原始值
-        client_secret_hash: client.client_secret_hash, // 保留原始值
-        wireguard: false,
-      }));
+    const gatewayInfo = {  
+    name: "服务器",  
+    virtual_ip: networkInfo.gateway,  
+    device_status: 0,  
+    client_secret: newClientInfo.client_secret || false,  
+    client_secret_hash: newClientInfo.client_secret_hash || new Uint8Array(0),  
+    wireguard: false,  
+  };
+    // 将网关信息添加到设备列表  
+  const deviceInfoList = [gatewayInfo, ...Array.from(networkInfo.clients.values())  
+    .filter((client) => client.virtual_ip !== 0)  
+    .map((client) => ({  
+      name: client.name,  
+      virtual_ip: client.virtual_ip,  
+      device_status: client.online ? 0 : 1,  
+      client_secret: client.client_secret,  
+      client_secret_hash: client.client_secret_hash,  
+      wireguard: false,  
+    }))];
 
     const responseData = {
       device_info_list: deviceInfoList,
@@ -686,8 +695,8 @@ export class PacketHandler {
 
     return response;
   }
-  async notifyClientsUpdate(networkInfo, newClientIp) {
-    const updatePacket = this.createDeviceUpdatePacket(networkInfo);
+  async notifyClientsUpdate(networkInfo, newClientIp, newClientInfo) {
+    const updatePacket = this.createDeviceUpdatePacket(networkInfo, newClientInfo);
 
     // 向所有已连接的客户端发送更新
     for (const [ip, client] of networkInfo.clients) {
@@ -711,6 +720,16 @@ export class PacketHandler {
     try {
       const payload = packet.payload();
       const registrationReq = this.parseRegistrationRequest(payload);
+      // 获取客户端hash  
+    let clientSecretHash = registrationReq.client_secret_hash || new Uint8Array(0);  
+      
+    // 添加日志显示客户端hash  
+    if (registrationReq.client_secret && clientSecretHash.length > 0) {  
+      logger.info(`[调试-客户端Hash] 设备: ${registrationReq.name}`);  
+      logger.info(`[调试-客户端Hash] Hash长度: ${clientSecretHash.length}`);  
+      logger.info(`[调试-客户端Hash] Hash内容: ${Array.from(clientSecretHash).map(b => b.toString(16).padStart(2, '0')).join('')}`);  
+      logger.info(`[调试-客户端Hash] Token: ${registrationReq.token}`);  
+    }
       logger.info(
         `[注册-请求] 解析注册请求，设备ID: ${
           registrationReq.device_id
@@ -768,9 +787,8 @@ export class PacketHandler {
         version: registrationReq.version,
         online: true,
         address: addr,
-        client_secret: registrationReq.client_secret || false, // 添加这行
-        client_secret_hash:
-          registrationReq.client_secret_hash || new Uint8Array(0),
+        clientSecret: registrationReq.client_secret || false,  // 改为 clientSecret  
+  clientSecretHash: registrationReq.client_secret_hash || new Uint8Array(0),  // 改为 clientSecretHash
         tcp_sender: tcpSender,
         timestamp: Date.now(),
       });
@@ -792,10 +810,10 @@ export class PacketHandler {
       };
 
       // 创建注册响应
-      const response = this.createRegistrationResponse(virtualIp, networkInfo);
+      const response = this.createRegistrationResponse(virtualIp, networkInfo, clientInfo);
       // 通知其他客户端有新设备加入
       // logger.debug(`[注册-通知] 通知其他客户端新设备加入`);
-      await this.notifyClientsUpdate(networkInfo, virtualIp);
+      await this.notifyClientsUpdate(networkInfo, virtualIp, clientInfo);
       logger.info(
         `[注册-完成] 注册成功，IP: ${this.formatIp(
           virtualIp
@@ -1085,19 +1103,22 @@ export class PacketHandler {
     return response;
   }
 
-  createRegistrationResponse(virtualIp, networkInfo) {
+  createRegistrationResponse(virtualIp, networkInfo, clientInfo) {
     logger.info(
       `[注册响应-开始] 创建注册响应包，客户端IP: ${this.formatIp(virtualIp)}`
     );
     // logger.debug(`[注册响应-网络] 当前网络客户端数量: ${networkInfo.clients.size}`);
-
+logger.info(  
+    `[注册响应-网关Hash] 网关使用客户端Hash: ${Array.from(clientInfo.client_secret_hash || new Uint8Array(0))  
+      .map(b => b.toString(16).padStart(2, '0')).join('')}`  
+  ); 
     // 明确添加网关信息
     const gatewayInfo = {
       name: "服务器",
       virtual_ip: networkInfo.gateway,
       device_status: 0, // 网关始终在线
-      client_secret: false,
-      client_secret_hash: new Uint8Array(0),
+      client_secret: clientInfo.client_secret || false, // 使用客户端的加密状态  
+    client_secret_hash: clientInfo.client_secret_hash || new Uint8Array(0), // 使用客户端的哈希
       wireguard: false,
     };
     // logger.debug(`[注册响应-网关] 网关信息创建完成，IP: ${this.formatIp(networkInfo.gateway)}`);
